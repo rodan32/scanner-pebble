@@ -1,0 +1,49 @@
+{
+  "name": "scanner-pebble",
+  "author": "rodan32",
+  "version": "1.0.0",
+  "private": true,
+  "keywords": [
+    "pebble-app"
+  ],
+  "dependencies": {
+    "pebble-clay": "^1.0.4"
+  },
+  "pebble": {
+    "displayName": "Scanner Feed",
+    "uuid": "7c84caa8-ae40-4425-89f0-878700a14966",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "emery",
+      "basalt",
+      "chalk",
+      "diorite"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "capabilities": [
+      "configurable"
+    ],
+    "messageKeys": [
+      "MSG_TYPE",
+      "CALL_ID",
+      "CALL_TIME",
+      "CALL_TAG",
+      "CALL_CAT",
+      "CALL_TEXT",
+      "CALL_EMERG",
+      "STATUS",
+      "FILTER",
+      "CMD",
+      "HOST",
+      "USERNAME",
+      "PASSWORD",
+      "DEFAULT_FILTER"
+    ],
+    "resources": {
+      "media": []
+    }
+  }
+}
