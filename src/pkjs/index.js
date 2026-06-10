@@ -50,9 +50,20 @@ var pollTimer = null;
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
+var DEFAULT_HOST = 'data.zarchstuff.com';
+// The feed moved off this host in 2026-06; it now 302-redirects (which strips
+// auth). Auto-migrate any saved config still pointing at it so existing
+// installs self-heal without the user re-entering settings.
+var DEAD_HOST = 'transcripts.zarchstuff.com';
+
+function migrateHost(host) {
+  if (!host || host === DEAD_HOST) return DEFAULT_HOST;
+  return host;
+}
+
 function getConfig() {
   var defaults = {
-    HOST: 'data.zarchstuff.com',
+    HOST: DEFAULT_HOST,
     USERNAME: '',
     PASSWORD: '',
     DEFAULT_FILTER: FILTER_LOCAL
@@ -66,6 +77,7 @@ function getConfig() {
         parsed[k] = defaults[k];
       }
     }
+    parsed.HOST = migrateHost(parsed.HOST);
     return parsed;
   } catch (e) {
     return defaults;
@@ -248,7 +260,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
   if (!e || !e.response) return;
   var settings = clay.getSettings(e.response);
   var cfg = {
-    HOST: (settings.HOST || '').trim() || 'data.zarchstuff.com',
+    HOST: migrateHost((settings.HOST || '').trim()),
     USERNAME: (settings.USERNAME || '').trim(),
     PASSWORD: settings.PASSWORD || '',
     DEFAULT_FILTER: parseInt(settings.DEFAULT_FILTER, 10) || FILTER_LOCAL
