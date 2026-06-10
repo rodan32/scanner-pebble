@@ -61,6 +61,14 @@ function migrateHost(host) {
   return host;
 }
 
+// Short label for the status bar: 'data.zarchstuff.com' -> 'data'. Lets the
+// watch show which host it's hitting (confirms the migration fired).
+function hostTag(host) {
+  host = host || '?';
+  var dot = host.indexOf('.');
+  return dot > 0 ? host.slice(0, dot) : host;
+}
+
 function getConfig() {
   var defaults = {
     HOST: DEFAULT_HOST,
@@ -169,16 +177,17 @@ function apiGet(cfg, path, onJson) {
   if (cfg.USERNAME) {
     xhr.setRequestHeader('Authorization', 'Basic ' + b64(cfg.USERNAME + ':' + cfg.PASSWORD));
   }
+  var tag = hostTag(cfg.HOST);
   xhr.onload = function () {
-    if (xhr.status === 401) { sendStatus('auth failed'); return; }
-    if (xhr.status !== 200) { sendStatus('http ' + xhr.status); return; }
+    if (xhr.status === 401) { sendStatus('auth failed @' + tag); return; }
+    if (xhr.status !== 200) { sendStatus('http ' + xhr.status + ' @' + tag); return; }
     var body;
     try { body = JSON.parse(xhr.responseText); }
-    catch (e) { sendStatus('bad data'); return; }
+    catch (e) { sendStatus('bad data @' + tag); return; }
     onJson(body);
   };
-  xhr.onerror = function () { sendStatus('offline'); };
-  xhr.ontimeout = function () { sendStatus('timeout'); };
+  xhr.onerror = function () { sendStatus('offline @' + tag); };
+  xhr.ontimeout = function () { sendStatus('timeout @' + tag); };
   xhr.send();
 }
 
@@ -232,6 +241,10 @@ function applyFilter(f) {
 
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
+  // Announce the target host on launch so the watch confirms which backend
+  // it's hitting (i.e. that the transcripts->data migration fired). The first
+  // poll result overwrites this with 'live' a moment later.
+  sendStatus('-> ' + getConfig().HOST);
   poll();
   pollTimer = setInterval(poll, POLL_MS);
 }
