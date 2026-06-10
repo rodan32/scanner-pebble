@@ -1,10 +1,20 @@
 // ---------------------------------------------------------------------------
 // Scanner Feed — PebbleKit JS bridge (runs on the phone)
 //
-// Polls the scanner backend's /api/recent, filters by the active preset
+// Polls the scanner backend's live-tail feed, filters by the active preset
 // (Local / Utah Co / All), and pushes one AppMessage per call to the watch.
 // Credentials + host come from the Clay settings page (src/pkjs/config.js)
 // so nothing sensitive lives in the repo.
+//
+// Endpoint (2026-06): the public feed moved from the old scanner-feed app
+// (transcripts.zarchstuff.com/api/recent) INTO the analytics app at
+// data.zarchstuff.com/feed/api/*. The old host now 302-redirects to the new
+// one — and because XHR strips the Authorization header on a cross-origin
+// redirect, hitting the old host fails basic auth ("auth failed") AND returns
+// HTML ("bad data"). So we target data.zarchstuff.com directly, no redirect.
+//
+//   GET /feed/api/feed?limit=N&areas=...   -> {calls:[...], next_cursor}  (seed/history, newest-first)
+//   GET /feed/api/since?after_id=ID&areas= -> {calls:[...], max_id}        (live-tail; server filters hallucinations)
 // ---------------------------------------------------------------------------
 
 var Clay = require('pebble-clay');
@@ -20,28 +30,21 @@ var FILTER_LOCAL = 0;
 var FILTER_UTCO = 1;
 var FILTER_ALL = 2;
 
-// "Local" talkgroups — Eagle Mountain / Saratoga / Lehi / American Fork area
-// plus Utah County Sheriff. A couple are marked VERIFY in talkgroups.csv;
-// tune this list as you confirm them.
-var LOCAL_TGS = {
-  6002: 1, // Saratoga Springs / Eagle Mountain PD (verify)
-  6000: 1, // American Fork Fire
-  6036: 1, // American Fork PD
-  6001: 1, // American Fork PD car-to-car
-  6003: 1, // Lehi PD
-  6010: 1, // Lehi PD car-to-car
-  6008: 1, // Lehi / AF PD secondary (verify)
-  5921: 1, // Utah County Sheriff 1
-  5922: 1, // Utah County Sheriff 2
-  5923: 1, // Utah County Sheriff 3
-  5924: 1, // Utah County Sheriff 4
-  5929: 1, // Utah County Sheriff North
-  63431: 1 // UCA SimPatch (Lehi-area fire/EMS)
-};
+// Filter -> backend `areas` chips (keys from analytics/app/areas.py). The
+// backend resolves each area to tg_alpha_tag substrings, so we think in
+// agencies, not talkgroup numbers. ALL sends no area filter (everything).
+//
+//   Local   = the busiest nearby agencies — guarantees a steady feed.
+//             (Orem/Lindon PD is by far the highest-volume TG.)
+//   Utah Co = every Utah-County-area chip.
+var LOCAL_AREAS = ['Orem', 'Lehi', 'American Fork', 'UtCo Sheriff', 'UtCo Fire/EMS'];
+var UTCO_AREAS = ['Orem', 'Provo', 'Lehi', 'American Fork', 'Springville',
+                  'Spanish Fork', 'UtCo Sheriff', 'UtCo Fire/EMS'];
 
+var SEED_LIMIT = 24;     // history to pull on launch / filter switch (= watch MAX_CALLS)
 var POLL_MS = 10000;
 var activeFilter = FILTER_LOCAL;
-var lastMaxId = 0;
+var lastMaxId = 0;       // server-side cursor: highest call id we've sent
 var pollTimer = null;
 
 // ---------------------------------------------------------------------------
@@ -49,7 +52,7 @@ var pollTimer = null;
 // ---------------------------------------------------------------------------
 function getConfig() {
   var defaults = {
-    HOST: 'transcripts.zarchstuff.com',
+    HOST: 'data.zarchstuff.com',
     USERNAME: '',
     PASSWORD: '',
     DEFAULT_FILTER: FILTER_LOCAL
@@ -59,7 +62,9 @@ function getConfig() {
   try {
     var parsed = JSON.parse(raw);
     for (var k in defaults) {
-      if (parsed[k] === undefined || parsed[k] === null) parsed[k] = defaults[k];
+      if (parsed[k] === undefined || parsed[k] === null || parsed[k] === '') {
+        parsed[k] = defaults[k];
+      }
     }
     return parsed;
   } catch (e) {
@@ -90,6 +95,7 @@ function b64(str) {
 // ---------------------------------------------------------------------------
 var sendQueue = [];
 var sending = false;
+var MAX_QUEUE = 60; // bound the backlog if the watch is disconnected
 
 function pump() {
   if (sending || sendQueue.length === 0) return;
@@ -99,13 +105,16 @@ function pump() {
     sending = false;
     pump();
   }, function () {
-    // On failure, drop this message and keep going (watch will catch up next poll).
+    // On failure, drop this message and keep going (watch catches up next poll).
     sending = false;
     pump();
   });
 }
 
 function enqueue(msg) {
+  // Status messages are tiny and always relevant; calls are the bulk. If the
+  // backlog is huge the watch is offline — drop oldest calls, keep newest.
+  if (sendQueue.length >= MAX_QUEUE) sendQueue.shift();
   sendQueue.push(msg);
   pump();
 }
@@ -115,40 +124,35 @@ function sendStatus(text) {
 }
 
 function sendCall(call) {
+  // New feed has no `emergency` bool — derive urgency from enrichment severity.
+  var sev = call.severity || '';
+  var emergency = (sev === 'critical' || sev === 'high') ? 1 : 0;
+  // No `category` anymore; the most useful secondary line is the incident type
+  // (e.g. "traffic stop") or the city, when enrichment has filled them in.
+  var cat = call.incident_type || call.city || '';
   enqueue({
     MSG_TYPE: MSG_CALL,
     CALL_ID: call.id,
-    CALL_TIME: String(call.time || '').slice(-15),
-    CALL_TAG: String(call.tag || '').slice(0, 26),
-    CALL_CAT: String(call.category || '').slice(0, 18),
+    CALL_TIME: String(call.time_local || '').slice(-15),
+    CALL_TAG: String(call.tg_alpha_tag || '').slice(0, 26),
+    CALL_CAT: String(cat).slice(0, 18),
     CALL_TEXT: String(call.transcript || '').slice(0, 156),
-    CALL_EMERG: call.emergency ? 1 : 0
+    CALL_EMERG: emergency
   });
 }
 
 // ---------------------------------------------------------------------------
-// Polling
+// Networking
 // ---------------------------------------------------------------------------
-function feedUrl(cfg) {
-  var base = 'https://' + cfg.HOST + '/api/recent';
-  if (activeFilter === FILTER_ALL) return base + '?limit=40';
-  // Local is a subset of Utah County, so both fetch the county feed.
-  return base + '?category=' + encodeURIComponent('Utah County') + '&limit=100';
+function areaParam() {
+  if (activeFilter === FILTER_ALL) return '';
+  var areas = (activeFilter === FILTER_UTCO) ? UTCO_AREAS : LOCAL_AREAS;
+  return '&areas=' + encodeURIComponent(areas.join(','));
 }
 
-function passesFilter(call) {
-  if (activeFilter === FILTER_ALL) return true;
-  if (activeFilter === FILTER_UTCO) return call.category === 'Utah County';
-  if (activeFilter === FILTER_LOCAL) return LOCAL_TGS[call.tg] === 1;
-  return true;
-}
-
-function poll() {
-  var cfg = getConfig();
-  if (!cfg.HOST) { sendStatus('set host'); return; }
-
+function apiGet(cfg, path, onJson) {
   var xhr = new XMLHttpRequest();
-  xhr.open('GET', feedUrl(cfg), true);
+  xhr.open('GET', 'https://' + cfg.HOST + path, true);
   xhr.timeout = 12000;
   if (cfg.USERNAME) {
     xhr.setRequestHeader('Authorization', 'Basic ' + b64(cfg.USERNAME + ':' + cfg.PASSWORD));
@@ -156,32 +160,61 @@ function poll() {
   xhr.onload = function () {
     if (xhr.status === 401) { sendStatus('auth failed'); return; }
     if (xhr.status !== 200) { sendStatus('http ' + xhr.status); return; }
-    var calls;
-    try { calls = JSON.parse(xhr.responseText); }
+    var body;
+    try { body = JSON.parse(xhr.responseText); }
     catch (e) { sendStatus('bad data'); return; }
-    if (!calls || !calls.length) { sendStatus('no calls'); return; }
-
-    // API returns chronological (oldest..newest). Send only ids past lastMaxId.
-    var sent = 0;
-    for (var i = 0; i < calls.length; i++) {
-      var c = calls[i];
-      if (!passesFilter(c)) continue;
-      if (c.id > lastMaxId) {
-        sendCall(c);
-        lastMaxId = c.id;
-        sent++;
-      }
-    }
-    if (sent === 0) sendStatus('live');
+    onJson(body);
   };
   xhr.onerror = function () { sendStatus('offline'); };
   xhr.ontimeout = function () { sendStatus('timeout'); };
   xhr.send();
 }
 
+// Seed: pull recent history for the active preset and prime the cursor.
+function seed(cfg) {
+  apiGet(cfg, '/feed/api/feed?limit=' + SEED_LIMIT + areaParam(), function (body) {
+    var calls = (body && body.calls) || [];
+    if (!calls.length) { sendStatus('no calls'); return; }
+    // /api/feed is newest-first; send oldest-first so the watch's "pin to top"
+    // ends on the most recent call.
+    var maxId = lastMaxId;
+    for (var i = calls.length - 1; i >= 0; i--) {
+      sendCall(calls[i]);
+      if (calls[i].id > maxId) maxId = calls[i].id;
+    }
+    lastMaxId = maxId;
+    sendStatus('live');
+  });
+}
+
+// Live-tail: ask the server for calls past our cursor. after_id=0 just seeds
+// the cursor (empty calls + current max_id), so we never re-dump history here.
+function pollSince(cfg) {
+  apiGet(cfg, '/feed/api/since?after_id=' + lastMaxId + areaParam(), function (body) {
+    var calls = (body && body.calls) || [];
+    // Server computes max_id from RAW rows (advances past hallucinations it
+    // filtered out of `calls`), so trust it over the call ids we see.
+    if (typeof body.max_id === 'number' && body.max_id > lastMaxId) {
+      lastMaxId = body.max_id;
+    }
+    if (!calls.length) { sendStatus('live'); return; }
+    for (var i = calls.length - 1; i >= 0; i--) {
+      sendCall(calls[i]);
+    }
+    sendStatus('live');
+  });
+}
+
+function poll() {
+  var cfg = getConfig();
+  if (!cfg.HOST) { sendStatus('set host'); return; }
+  if (lastMaxId === 0) seed(cfg);
+  else pollSince(cfg);
+}
+
 function applyFilter(f) {
   activeFilter = f;
-  lastMaxId = 0; // resend the full window for the new preset (watch cleared its cache)
+  lastMaxId = 0; // watch cleared its cache on switch — reseed history for the new preset
   poll();
 }
 
@@ -215,7 +248,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
   if (!e || !e.response) return;
   var settings = clay.getSettings(e.response);
   var cfg = {
-    HOST: (settings.HOST || '').trim(),
+    HOST: (settings.HOST || '').trim() || 'data.zarchstuff.com',
     USERNAME: (settings.USERNAME || '').trim(),
     PASSWORD: settings.PASSWORD || '',
     DEFAULT_FILTER: parseInt(settings.DEFAULT_FILTER, 10) || FILTER_LOCAL

@@ -1,6 +1,6 @@
 module.exports = [
   { type: 'heading', defaultValue: 'Scanner Feed' },
-  { type: 'text', defaultValue: 'Connection to your scanner backend (behind NPM basic auth).' },
+  { type: 'text', defaultValue: 'Connection to your scanner backend (behind NPM basic auth). Use the analytics host — data.zarchstuff.com — not the old transcripts host, which redirects and breaks auth.' },
   {
     type: 'section',
     items: [
@@ -8,8 +8,8 @@ module.exports = [
         type: 'input',
         messageKey: 'HOST',
         label: 'Host',
-        defaultValue: 'transcripts.zarchstuff.com',
-        attributes: { placeholder: 'transcripts.zarchstuff.com' }
+        defaultValue: 'data.zarchstuff.com',
+        attributes: { placeholder: 'data.zarchstuff.com' }
       },
       {
         type: 'input',

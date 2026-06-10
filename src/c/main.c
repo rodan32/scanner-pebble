@@ -246,8 +246,16 @@ static void detail_window_load(Window *window) {
   scroll_layer_set_click_config_onto_window(s_detail_scroll, window);
 
   CallEntry *e = &s_calls[s_detail_index];
-  snprintf(s_detail_buf, sizeof(s_detail_buf), "%s  %s\n%s\n\n%s",
-           e->time, e->tag, e->cat[0] ? e->cat : "", e->text);
+  // `cat` (incident type / city) is often empty in the current feed — only
+  // give it its own line when present, so the transcript isn't pushed down by
+  // a blank gap.
+  if (e->cat[0]) {
+    snprintf(s_detail_buf, sizeof(s_detail_buf), "%s  %s\n%s\n\n%s",
+             e->time, e->tag, e->cat, e->text);
+  } else {
+    snprintf(s_detail_buf, sizeof(s_detail_buf), "%s  %s\n\n%s",
+             e->time, e->tag, e->text);
+  }
 
   s_detail_text = text_layer_create(GRect(4, 2, b.size.w - 8, 2000));
   text_layer_set_text(s_detail_text, s_detail_buf);
