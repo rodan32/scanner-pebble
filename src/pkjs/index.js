@@ -93,6 +93,8 @@ function getConfig() {
 }
 
 // Minimal base64 with correct '=' padding — PebbleKit JS has no reliable btoa.
+// Operates on a *byte string* (each char 0..255); callers must UTF-8-encode
+// first (see toUtf8 / authHeader) so non-ASCII credentials encode correctly.
 function b64(str) {
   var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   var out = '';
@@ -108,6 +110,36 @@ function b64(str) {
     out += hasB3 ? chars.charAt(b3 & 63) : '=';
   }
   return out;
+}
+
+// HTTP Basic auth (RFC 7617) encodes "user:pass" as UTF-8 bytes before base64.
+// PebbleKit JS has no TextEncoder, so fold each codepoint to its UTF-8 byte
+// sequence by hand. Pure-ASCII input is unchanged; this only matters when a
+// credential contains a non-ASCII char — in which case `charCodeAt & 0xff`
+// would otherwise truncate it and the server rejects correct creds (401).
+function toUtf8(str) {
+  var out = '';
+  for (var i = 0; i < str.length; i++) {
+    var c = str.charCodeAt(i);
+    if (c < 0x80) {
+      out += String.fromCharCode(c);
+    } else if (c < 0x800) {
+      out += String.fromCharCode(0xC0 | (c >> 6), 0x80 | (c & 0x3F));
+    } else if (c < 0xD800 || c >= 0xE000) {
+      out += String.fromCharCode(0xE0 | (c >> 12), 0x80 | ((c >> 6) & 0x3F), 0x80 | (c & 0x3F));
+    } else {
+      // high surrogate — combine with the following low surrogate
+      var c2 = str.charCodeAt(++i);
+      var cp = 0x10000 + (((c & 0x3FF) << 10) | (c2 & 0x3FF));
+      out += String.fromCharCode(0xF0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3F),
+                                 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F));
+    }
+  }
+  return out;
+}
+
+function authHeader(user, pass) {
+  return 'Basic ' + b64(toUtf8(user + ':' + pass));
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +207,7 @@ function apiGet(cfg, path, onJson) {
   xhr.open('GET', 'https://' + cfg.HOST + path, true);
   xhr.timeout = 12000;
   if (cfg.USERNAME) {
-    xhr.setRequestHeader('Authorization', 'Basic ' + b64(cfg.USERNAME + ':' + cfg.PASSWORD));
+    xhr.setRequestHeader('Authorization', authHeader(cfg.USERNAME, cfg.PASSWORD));
   }
   var tag = hostTag(cfg.HOST);
   xhr.onload = function () {
@@ -229,6 +261,11 @@ function pollSince(cfg) {
 function poll() {
   var cfg = getConfig();
   if (!cfg.HOST) { sendStatus('set host'); return; }
+  // The backend is gated by NPM basic auth, so a missing credential is a
+  // guaranteed 401. Surface that distinctly instead of letting it come back as
+  // the ambiguous 'auth failed' (which otherwise can't be told apart from
+  // *wrong* creds — see the credential-preserving save in webviewclosed).
+  if (!cfg.USERNAME) { sendStatus('set creds @' + hostTag(cfg.HOST)); return; }
   if (lastMaxId === 0) seed(cfg);
   else pollSince(cfg);
 }
@@ -269,14 +306,39 @@ Pebble.addEventListener('showConfiguration', function () {
   Pebble.openURL(clay.generateUrl());
 });
 
+// Pull a value out of clay.getSettings(resp, false) output, which is keyed by
+// the string messageKey with each item shaped like { value: ... }. (Defensive
+// against a raw value too, in case a Clay version returns it unwrapped.)
+function settingValue(settings, key) {
+  var item = settings ? settings[key] : undefined;
+  if (item && typeof item === 'object' && 'value' in item) item = item.value;
+  return (item === undefined || item === null) ? '' : item;
+}
+
 Pebble.addEventListener('webviewclosed', function (e) {
+  // Page closed without submitting (backed out instead of Save) — nothing to do.
   if (!e || !e.response) return;
-  var settings = clay.getSettings(e.response);
+
+  // IMPORTANT: pass convert=false. The default (true) returns the settings
+  // keyed by NUMERIC message-key ids for sendAppMessage, so reading
+  // settings.USERNAME by name yields undefined and silently stores empty creds.
+  // convert=false keys by the string messageKey with values under `.value`.
+  var settings = clay.getSettings(e.response, false);
+
+  // The form opens blank when only the filter is changed (we persist creds
+  // under our own 'config' key, not Clay's), so treat an empty field as
+  // "unchanged" and fall back to the saved value rather than wiping it.
+  var prev = getConfig();
+  var host = migrateHost(String(settingValue(settings, 'HOST')).trim());
+  var user = String(settingValue(settings, 'USERNAME')).trim();
+  var pass = String(settingValue(settings, 'PASSWORD'));
+  var df = parseInt(settingValue(settings, 'DEFAULT_FILTER'), 10);
+
   var cfg = {
-    HOST: migrateHost((settings.HOST || '').trim()),
-    USERNAME: (settings.USERNAME || '').trim(),
-    PASSWORD: settings.PASSWORD || '',
-    DEFAULT_FILTER: parseInt(settings.DEFAULT_FILTER, 10) || FILTER_LOCAL
+    HOST: host || prev.HOST,
+    USERNAME: user || prev.USERNAME,
+    PASSWORD: pass || prev.PASSWORD,
+    DEFAULT_FILTER: isNaN(df) ? prev.DEFAULT_FILTER : df
   };
   localStorage.setItem('config', JSON.stringify(cfg));
   activeFilter = cfg.DEFAULT_FILTER;
