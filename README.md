@@ -53,6 +53,84 @@ auth), so the phone bridge works on any network.
 > directly. The new `/feed/api/*` responses are wrapped objects
 > (`{calls:[…], max_id}`), not bare arrays.
 
+## Hard-won gotchas (read before reusing this as a template)
+
+Every one of these cost real debugging time on this app. If you're starting a
+new Pebble + Clay + CloudPebble project, read these first.
+
+### 1. `clay.getSettings()` defaults to `convert=true` — read with `false`
+
+This was the big one: **settings entered in the config page silently saved as
+empty.** `clay.getSettings(e.response)` defaults to `convert: true`, which
+returns the settings keyed by **numeric message-key IDs** (the shape
+`Pebble.sendAppMessage()` wants). Reading them by *name* — `settings.USERNAME` —
+is then always `undefined`, so you persist blank values and never notice.
+
+```js
+// WRONG — keys are numeric ids; settings.USERNAME is undefined
+var settings = clay.getSettings(e.response);
+var user = settings.USERNAME;
+
+// RIGHT — keys are the string messageKey; value is under `.value`
+var settings = clay.getSettings(e.response, false);
+var user = settings.USERNAME && settings.USERNAME.value;
+```
+
+Only do this if you read settings by name on the JS side (as we do, persisting
+to our own `localStorage`). If you just forward the dict straight to
+`sendAppMessage`, the default `convert: true` is correct.
+
+### 2. With `autoHandleEvents: false`, you own persistence — and the form opens blank
+
+We pass `autoHandleEvents: false` so we can store config under our own key. The
+trade-off: Clay does **not** repopulate the form from your storage, so it opens
+blank every time. Treat an empty field on save as **"unchanged," not "clear"** —
+fall back to the saved value — or a settings tweak (e.g. just changing a filter)
+will silently wipe creds. See `webviewclosed` in `src/pkjs/index.js`.
+
+### 3. HTTP Basic auth must be UTF-8, then base64 (RFC 7617)
+
+PebbleKit JS has no reliable `btoa`/`TextEncoder`. A hand-rolled base64 that
+does `charCodeAt(i) & 0xff` is correct **only for ASCII** — any non-ASCII char
+in a username/password (accent, `£`, dash, emoji) gets truncated and the server
+401s on correct creds. UTF-8-encode the `user:pass` string first, then base64.
+See `toUtf8` / `authHeader` in `src/pkjs/index.js`.
+
+### 4. XHR strips `Authorization` across a cross-origin redirect
+
+If your endpoint 301/302s to a different host, the browser/XHR drops the
+`Authorization` header on the redirected request and you get a 401 that looks
+like bad creds. Target the final host directly; don't rely on a redirect.
+
+### 5. CloudPebble's GitHub sync is manual, one-branch, and doesn't build
+
+The slowest part of this whole saga was the build pipeline, not the code:
+
+- **Pull ≠ build ≠ install.** They're three separate actions. A GitHub pull
+  only updates source in CloudPebble; you still have to **Run build** and then
+  **Install** to the phone.
+- **Sync is manual and per-branch.** CloudPebble pulls one configured branch
+  (usually `master`) only when you click *Pull from GitHub* — it does not
+  auto-sync on push. Develop on a branch but get it onto the branch CloudPebble
+  tracks.
+- **Bump the version** (`package.json` → `version`) so you can *confirm on the
+  watch* that the new build actually landed (check the app's About screen).
+  Half this app's "fixes didn't work" turns were just stale builds.
+- **PebbleKit JS is cached by the phone app.** If new JS doesn't take, **delete
+  the app from the watch and reinstall**, and force-quit/reopen the Pebble phone
+  app to clear the bridge cache.
+- If a pull "succeeds" but the editor still shows old code, **delete the
+  CloudPebble project and re-import fresh** rather than fighting a stuck sync.
+
+### 6. Make failure states legible on the watch
+
+The watch's only debug channel is the status line, so make it carry signal:
+distinguish `set creds` (no credential stored) from `auth failed` (server
+rejected) from `offline`/`timeout`, and tag the host (`@data`) so a stuck watch
+tells you where it was pointed. When stuck, a temporary status that reports
+*lengths* of stored values (never the values themselves) is a safe way to see
+what's actually in storage.
+
 ## Testing the JS bridge (no watch needed)
 
 `test/harness.js` mocks the Pebble runtime, loads the real `src/pkjs/index.js`,
