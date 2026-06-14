@@ -18,9 +18,10 @@ Companion to the PicoCalc Scanner Terminal — same backend, Pebble-native UI.
 | Detail  | BACK           | return to the list                                |
 
 The top bar shows the active filter and connection status (`live`, `offline`,
-`auth failed`, etc.). In the list, the **talkgroup tag is color-coded by agency
-type** (police / sheriff / fire / EMS / highway patrol) on color watches, with
-emergencies shown in red; B&W watches fall back to black text.
+`auth failed`, etc.). The **talkgroup is color-coded by agency type** (police /
+sheriff / fire / EMS / highway patrol) on color watches — both in the list and
+on the detail header — with emergencies shown in red; B&W watches fall back to
+black text.
 
 ## Filters
 

@@ -62,7 +62,9 @@ static MenuLayer   *s_menu_layer;
 static Window      *s_detail_window;
 static ScrollLayer *s_detail_scroll;
 static TextLayer   *s_detail_text;
+static TextLayer   *s_detail_header;
 static char         s_detail_buf[260];
+static char         s_detail_head[80];
 static int          s_detail_index = -1;
 
 // ---------------------------------------------------------------------------
@@ -281,22 +283,29 @@ static void push_detail(int row) {
   window_stack_push(s_detail_window, true);
 }
 
-// Rebuild the detail view for the current s_detail_index: refresh the text,
-// resize the scroll content, reset to the top, and keep the list selection in
-// sync so backing out lands on the call you ended on.
+// Rebuild the detail view for the current s_detail_index: refresh the colored
+// header + body text, resize the scroll content, reset to the top, and keep the
+// list selection in sync so backing out lands on the call you ended on.
 static void detail_render(void) {
   if (!s_detail_text || s_detail_index < 0 || s_detail_index >= s_count) return;
   CallEntry *e = &s_calls[s_detail_index];
 
-  // `cat` (incident type / city) is often empty in the current feed — only
-  // give it its own line when present. The trailing line hints the new nav.
-  const char *hint = "\n\n\xE2\x80\x94 UP / DOWN: prev / next \xE2\x80\x94";
+  // Header: time + talkgroup, color-coded by agency type (red for emergency)
+  // to match the list. Stays fixed at the top while the transcript scrolls.
+  snprintf(s_detail_head, sizeof(s_detail_head), "%s  %s", e->time, e->tag);
+  text_layer_set_text(s_detail_header, s_detail_head);
+  GColor hc = GColorBlack;
+#ifdef PBL_COLOR
+  hc = e->emergency ? GColorRed : tg_color(tg_type(e->tag));
+#endif
+  text_layer_set_text_color(s_detail_header, hc);
+
+  // Body: incident type / city (when present) + the transcript, kept neutral
+  // black for readability.
   if (e->cat[0]) {
-    snprintf(s_detail_buf, sizeof(s_detail_buf), "%s  %s\n%s\n\n%s%s",
-             e->time, e->tag, e->cat, e->text, hint);
+    snprintf(s_detail_buf, sizeof(s_detail_buf), "%s\n\n%s", e->cat, e->text);
   } else {
-    snprintf(s_detail_buf, sizeof(s_detail_buf), "%s  %s\n\n%s%s",
-             e->time, e->tag, e->text, hint);
+    snprintf(s_detail_buf, sizeof(s_detail_buf), "%s", e->text);
   }
   text_layer_set_text(s_detail_text, s_detail_buf);
 
@@ -356,8 +365,15 @@ static void detail_window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect b = layer_get_bounds(root);
 
-  s_detail_scroll = scroll_layer_create(b);
-  s_detail_text = text_layer_create(GRect(4, 2, b.size.w - 8, 2000));
+  // Fixed, color-coded header (up to two lines); transcript scrolls beneath it.
+  const int head_h = 58;
+  s_detail_header = text_layer_create(GRect(4, 2, b.size.w - 8, head_h - 4));
+  text_layer_set_font(s_detail_header, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+  text_layer_set_overflow_mode(s_detail_header, GTextOverflowModeTrailingEllipsis);
+  layer_add_child(root, text_layer_get_layer(s_detail_header));
+
+  s_detail_scroll = scroll_layer_create(GRect(0, head_h, b.size.w, b.size.h - head_h));
+  s_detail_text = text_layer_create(GRect(4, 0, b.size.w - 8, 2000));
   text_layer_set_font(s_detail_text, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
   text_layer_set_overflow_mode(s_detail_text, GTextOverflowModeWordWrap);
   scroll_layer_add_child(s_detail_scroll, text_layer_get_layer(s_detail_text));
@@ -372,8 +388,10 @@ static void detail_window_load(Window *window) {
 
 static void detail_window_unload(Window *window) {
   text_layer_destroy(s_detail_text);
+  text_layer_destroy(s_detail_header);
   scroll_layer_destroy(s_detail_scroll);
   s_detail_text = NULL;
+  s_detail_header = NULL;
   s_detail_scroll = NULL;
 }
 
