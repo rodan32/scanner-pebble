@@ -14,7 +14,7 @@
 // Controls:
 //   List:   UP / DOWN        scroll the feed
 //           SELECT (short)   open the full transcript for the highlighted call
-//           SELECT (long)    cycle filter: Local -> Utah Co -> All -> Local
+//           SELECT (long)    cycle filter: Local -> Utah Co -> All -> Faves
 //   Detail: UP / DOWN        scroll; at the top/bottom, step to prev/next call
 //           BACK             return to the list
 // ---------------------------------------------------------------------------
@@ -29,9 +29,10 @@
 #define FILTER_LOCAL 0
 #define FILTER_UTCO  1
 #define FILTER_ALL   2
-#define FILTER_COUNT 3
+#define FILTER_FAV   3
+#define FILTER_COUNT 4
 
-static const char *FILTER_NAMES[FILTER_COUNT] = { "Local", "Utah Co", "All" };
+static const char *FILTER_NAMES[FILTER_COUNT] = { "Local", "Utah Co", "All", "Faves" };
 
 // Persistence keys
 #define PKEY_VERSION 1

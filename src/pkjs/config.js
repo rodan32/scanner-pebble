@@ -36,9 +36,23 @@ module.exports = [
         options: [
           { label: 'Local', value: '0' },
           { label: 'Utah Co', value: '1' },
-          { label: 'All', value: '2' }
+          { label: 'All', value: '2' },
+          { label: 'Faves', value: '3' }
         ]
-      }
+      },
+      {
+        type: 'input',
+        messageKey: 'FAVE_AREAS',
+        label: 'Favorite areas',
+        attributes: { placeholder: 'Orem, Provo, UHP' }
+      },
+      {
+        type: 'input',
+        messageKey: 'MUTE_TAGS',
+        label: 'Mute talkgroups',
+        attributes: { placeholder: 'Orem PD, Dispatch' }
+      },
+      { type: 'text', defaultValue: 'Favorite areas: comma-separated agency/area names for the "Faves" preset (same names as the built-in presets, e.g. Orem, Provo, UHP). Mute talkgroups: comma-separated text — any call whose talkgroup contains one of these is hidden. Both fields show blank on open; leaving one blank keeps the current value, and typing "none" clears it.' }
     ]
   },
   { type: 'submit', defaultValue: 'Save' }

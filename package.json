@@ -1,7 +1,7 @@
 {
   "name": "scanner-pebble",
   "author": "rodan32",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "private": true,
   "keywords": [
     "pebble-app"
@@ -40,7 +40,9 @@
       "HOST",
       "USERNAME",
       "PASSWORD",
-      "DEFAULT_FILTER"
+      "DEFAULT_FILTER",
+      "FAVE_AREAS",
+      "MUTE_TAGS"
     ],
     "resources": {
       "media": []

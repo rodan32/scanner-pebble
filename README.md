@@ -34,6 +34,14 @@ substrings (`analytics/app/areas.py`). The presets map to area lists in
   preset always has a steady feed.)
 - **Utah Co** — every Utah-County-area chip.
 - **All** — unfiltered (statewide: UHP, DPS, SLCo, etc.).
+- **Faves** — your own area list from settings (`FAVE_AREAS`, comma-separated
+  area names). Empty falls back to All.
+
+**Muting:** `MUTE_TAGS` (settings) is a comma-separated list of substrings; any
+call whose talkgroup tag contains one is dropped on the phone before it reaches
+the watch — a cheap way to silence a chatty channel. Both list fields show blank
+when the settings page opens: leaving one blank keeps the current value, and
+typing `none` clears it.
 
 ## Architecture
 
@@ -43,7 +51,7 @@ substrings (`analytics/app/areas.py`). The presets map to area lists in
   live-tails `/feed/api/since?after_id=` every 10s, sending one AppMessage per
   call. Basic-auth creds come from settings.
 - `src/pkjs/config.js` — Clay settings page (host / user / password / default
-  filter). Nothing sensitive is committed.
+  filter / favorite areas / muted talkgroups). Nothing sensitive is committed.
 
 The watch can't reach the LAN directly — all network access is through the
 phone (PebbleKit JS). The backend is public over HTTPS (Cloudflare + NPM basic
@@ -181,6 +189,9 @@ This repo is the source of truth; CloudPebble is the build/flash backend
 
 ## Roadmap
 
-- Emergency vibrate + highlight (flag is already plumbed through).
 - Ask query (canned/dictated questions to `/ask`).
-- Favorites-based talkgroup switching.
+- Per-call audio playback on the phone (`Pebble.openURL` to the call's audio
+  URL) — parked until the backend exposes a per-call audio endpoint. Watch-side
+  speaker playback waits on a PebbleOS app audio API.
+- Emergency vibrate + highlight (flag is already plumbed through) — deferred;
+  scanner emergencies are currently too noisy to be useful.

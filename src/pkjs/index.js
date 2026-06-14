@@ -2,9 +2,9 @@
 // Scanner Feed — PebbleKit JS bridge (runs on the phone)
 //
 // Polls the scanner backend's live-tail feed, filters by the active preset
-// (Local / Utah Co / All), and pushes one AppMessage per call to the watch.
-// Credentials + host come from the Clay settings page (src/pkjs/config.js)
-// so nothing sensitive lives in the repo.
+// (Local / Utah Co / All / Favorites), optionally drops muted talkgroups, and
+// pushes one AppMessage per call to the watch. Credentials, host, favorite
+// areas and muted talkgroups come from the Clay settings page (config.js).
 //
 // Endpoint (2026-06): the public feed moved from the old scanner-feed app
 // (transcripts.zarchstuff.com/api/recent) INTO the analytics app at
@@ -29,6 +29,7 @@ var MSG_STATUS = 1;
 var FILTER_LOCAL = 0;
 var FILTER_UTCO = 1;
 var FILTER_ALL = 2;
+var FILTER_FAV = 3;   // user-configured "Favorites" areas (FAVE_AREAS setting)
 
 // Filter -> backend `areas` chips (keys from analytics/app/areas.py). The
 // backend resolves each area to tg_alpha_tag substrings, so we think in
@@ -74,7 +75,9 @@ function getConfig() {
     HOST: DEFAULT_HOST,
     USERNAME: '',
     PASSWORD: '',
-    DEFAULT_FILTER: FILTER_LOCAL
+    DEFAULT_FILTER: FILTER_LOCAL,
+    FAVE_AREAS: '',   // comma-separated area chips for the Favorites preset
+    MUTE_TAGS: ''     // comma-separated tag substrings to drop from the feed
   };
   var raw = localStorage.getItem('config');
   if (!raw) return defaults;
@@ -196,8 +199,32 @@ function sendCall(call) {
 // ---------------------------------------------------------------------------
 // Networking
 // ---------------------------------------------------------------------------
-function areaParam() {
+// Parse a comma-separated settings string into a trimmed, non-empty list.
+function parseList(s) {
+  return String(s || '').split(',').map(function (x) { return x.trim(); })
+                        .filter(function (x) { return x.length > 0; });
+}
+
+// Mute: drop calls whose talkgroup tag contains any user-configured substring
+// (case-insensitive). Filtered on the phone so muted calls never reach the
+// watch or its cache.
+function isMuted(cfg, call) {
+  var mutes = parseList(cfg.MUTE_TAGS);
+  if (!mutes.length) return false;
+  var tag = String(call.tg_alpha_tag || '').toLowerCase();
+  for (var i = 0; i < mutes.length; i++) {
+    if (tag.indexOf(mutes[i].toLowerCase()) >= 0) return true;
+  }
+  return false;
+}
+
+function areaParam(cfg) {
   if (activeFilter === FILTER_ALL) return '';
+  if (activeFilter === FILTER_FAV) {
+    var fav = parseList(cfg.FAVE_AREAS);
+    if (!fav.length) return '';  // no favorites configured -> behave like All
+    return '&areas=' + encodeURIComponent(fav.join(','));
+  }
   var areas = (activeFilter === FILTER_UTCO) ? UTCO_AREAS : LOCAL_AREAS;
   return '&areas=' + encodeURIComponent(areas.join(','));
 }
@@ -225,15 +252,16 @@ function apiGet(cfg, path, onJson) {
 
 // Seed: pull recent history for the active preset and prime the cursor.
 function seed(cfg) {
-  apiGet(cfg, '/feed/api/feed?limit=' + SEED_LIMIT + areaParam(), function (body) {
+  apiGet(cfg, '/feed/api/feed?limit=' + SEED_LIMIT + areaParam(cfg), function (body) {
     var calls = (body && body.calls) || [];
     if (!calls.length) { sendStatus('no calls'); return; }
     // /api/feed is newest-first; send oldest-first so the watch's "pin to top"
     // ends on the most recent call.
     var maxId = lastMaxId;
     for (var i = calls.length - 1; i >= 0; i--) {
-      sendCall(calls[i]);
+      // Advance the cursor past muted calls too, so we don't re-pull them.
       if (calls[i].id > maxId) maxId = calls[i].id;
+      if (!isMuted(cfg, calls[i])) sendCall(calls[i]);
     }
     lastMaxId = maxId;
     sendStatus('live');
@@ -243,7 +271,7 @@ function seed(cfg) {
 // Live-tail: ask the server for calls past our cursor. after_id=0 just seeds
 // the cursor (empty calls + current max_id), so we never re-dump history here.
 function pollSince(cfg) {
-  apiGet(cfg, '/feed/api/since?after_id=' + lastMaxId + areaParam(), function (body) {
+  apiGet(cfg, '/feed/api/since?after_id=' + lastMaxId + areaParam(cfg), function (body) {
     var calls = (body && body.calls) || [];
     // Server computes max_id from RAW rows (advances past hallucinations it
     // filtered out of `calls`), so trust it over the call ids we see.
@@ -252,7 +280,7 @@ function pollSince(cfg) {
     }
     if (!calls.length) { sendStatus('live'); return; }
     for (var i = calls.length - 1; i >= 0; i--) {
-      sendCall(calls[i]);
+      if (!isMuted(cfg, calls[i])) sendCall(calls[i]);
     }
     sendStatus('live');
   });
@@ -333,12 +361,24 @@ Pebble.addEventListener('webviewclosed', function (e) {
   var user = String(settingValue(settings, 'USERNAME')).trim();
   var pass = String(settingValue(settings, 'PASSWORD'));
   var df = parseInt(settingValue(settings, 'DEFAULT_FILTER'), 10);
+  var fave = String(settingValue(settings, 'FAVE_AREAS')).trim();
+  var mute = String(settingValue(settings, 'MUTE_TAGS')).trim();
+
+  // The Clay form opens blank each time (we persist config ourselves), so an
+  // empty field means "unchanged" — keep the saved value. To deliberately
+  // clear a list, type "none".
+  function listField(raw, prevVal) {
+    if (!raw) return prevVal;
+    return (raw.toLowerCase() === 'none') ? '' : raw;
+  }
 
   var cfg = {
     HOST: host || prev.HOST,
     USERNAME: user || prev.USERNAME,
     PASSWORD: pass || prev.PASSWORD,
-    DEFAULT_FILTER: isNaN(df) ? prev.DEFAULT_FILTER : df
+    DEFAULT_FILTER: isNaN(df) ? prev.DEFAULT_FILTER : df,
+    FAVE_AREAS: listField(fave, prev.FAVE_AREAS),
+    MUTE_TAGS: listField(mute, prev.MUTE_TAGS)
   };
   localStorage.setItem('config', JSON.stringify(cfg));
   activeFilter = cfg.DEFAULT_FILTER;
