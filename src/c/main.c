@@ -3,17 +3,20 @@
 // ---------------------------------------------------------------------------
 // Scanner Feed — Pebble watchapp
 //
-// Shows a live-ish feed of P25 scanner calls relayed from the LAN backend by
-// the phone (PebbleKit JS, see src/pkjs/index.js). The JS side polls
-// transcripts.zarchstuff.com/api/recent, filters by the active preset, and
-// pushes one AppMessage per call. This C side keeps a small ring buffer,
-// renders it as a scrollable list, and persists it so the app opens instantly
-// with the last-known feed even before the phone reconnects.
+// Shows a live-ish feed of P25 scanner calls relayed from the backend by the
+// phone (PebbleKit JS, see src/pkjs/index.js). The JS side polls
+// data.zarchstuff.com/feed/api/*, filters by the active preset, and pushes one
+// AppMessage per call. This C side keeps a small ring buffer, renders it as a
+// scrollable list (talkgroup color-coded by agency type), and persists it so
+// the app opens instantly with the last-known feed even before the phone
+// reconnects.
 //
 // Controls:
-//   UP / DOWN          scroll the feed
-//   SELECT (short)     open the full transcript for the highlighted call
-//   SELECT (long)      cycle filter: Local -> Utah Co -> All -> Local
+//   List:   UP / DOWN        scroll the feed
+//           SELECT (short)   open the full transcript for the highlighted call
+//           SELECT (long)    cycle filter: Local -> Utah Co -> All -> Local
+//   Detail: UP / DOWN        scroll; at the top/bottom, step to prev/next call
+//           BACK             return to the list
 // ---------------------------------------------------------------------------
 
 #define MAX_CALLS 24
@@ -61,6 +64,44 @@ static ScrollLayer *s_detail_scroll;
 static TextLayer   *s_detail_text;
 static char         s_detail_buf[260];
 static int          s_detail_index = -1;
+
+// ---------------------------------------------------------------------------
+// Talkgroup classification — color-codes the tag text by agency type so the
+// feed is easier to scan. Matching is by substring on the alpha tag (e.g.
+// "UtCo Fire/EMS", "Orem/Lindon PD", "UtCo Sher 3", "UHP ...").
+// ---------------------------------------------------------------------------
+#ifdef PBL_COLOR
+typedef enum {
+  TG_OTHER = 0, TG_POLICE, TG_SHERIFF, TG_FIRE, TG_EMS, TG_FIREEMS, TG_HIWAY
+} TgType;
+
+static TgType tg_type(const char *tag) {
+  bool fire = strstr(tag, "Fire") != NULL;
+  bool ems  = strstr(tag, "EMS") != NULL || strstr(tag, "Med") != NULL ||
+              strstr(tag, "Ambul") != NULL;
+  if (fire && ems) return TG_FIREEMS;
+  if (fire)        return TG_FIRE;
+  if (ems)         return TG_EMS;
+  if (strstr(tag, "Sher") || strstr(tag, "Sheriff") || strstr(tag, " SO")) return TG_SHERIFF;
+  if (strstr(tag, "UHP") || strstr(tag, "DPS") || strstr(tag, "Trooper") ||
+      strstr(tag, "Patrol") || strstr(tag, "Hwy")) return TG_HIWAY;
+  if (strstr(tag, "PD") || strstr(tag, "Police")) return TG_POLICE;
+  return TG_OTHER;
+}
+
+// Saturated colors chosen to stay legible on the white (unselected) row bg.
+static GColor tg_color(TgType t) {
+  switch (t) {
+    case TG_POLICE:  return GColorBlue;
+    case TG_SHERIFF: return GColorWindsorTan;
+    case TG_FIRE:    return GColorOrange;
+    case TG_FIREEMS: return GColorOrange;
+    case TG_EMS:     return GColorIslamicGreen;
+    case TG_HIWAY:   return GColorImperialPurple;
+    default:         return GColorBlack;
+  }
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Persistence
@@ -156,24 +197,26 @@ static void menu_draw_row(GContext *gctx, const Layer *cell, MenuIndex *idx, voi
   CallEntry *e = &s_calls[idx->row];
   bool selected = menu_cell_layer_is_highlighted(cell);
 
-  GColor head_color = GColorBlack;
+  // Time stays neutral; the talkgroup tag carries the agency color so the feed
+  // is quick to scan. Emergency calls override to red for both.
+  GColor time_color = selected ? GColorWhite : GColorBlack;
+  GColor tag_color  = selected ? GColorWhite : GColorBlack;
 #if defined(PBL_COLOR)
-  if (e->emergency) head_color = GColorRed;
-#endif
-  if (selected) {
-#if defined(PBL_COLOR)
-    head_color = e->emergency ? GColorRed : GColorWhite;
-#else
-    head_color = GColorWhite;
-#endif
+  if (e->emergency) {
+    tag_color  = GColorRed;
+    time_color = selected ? GColorWhite : GColorRed;
+  } else if (!selected) {
+    tag_color = tg_color(tg_type(e->tag));
   }
+#endif
 
   // Top line: HH:MM:SS  +  talkgroup tag (right aligned)
-  graphics_context_set_text_color(gctx, head_color);
+  graphics_context_set_text_color(gctx, time_color);
   graphics_draw_text(gctx, e->time,
                      fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
                      GRect(6, -2, 78, 20),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  graphics_context_set_text_color(gctx, tag_color);
   graphics_draw_text(gctx, e->tag,
                      fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
                      GRect(84, -2, b.size.w - 90, 20),
@@ -238,36 +281,93 @@ static void push_detail(int row) {
   window_stack_push(s_detail_window, true);
 }
 
+// Rebuild the detail view for the current s_detail_index: refresh the text,
+// resize the scroll content, reset to the top, and keep the list selection in
+// sync so backing out lands on the call you ended on.
+static void detail_render(void) {
+  if (!s_detail_text || s_detail_index < 0 || s_detail_index >= s_count) return;
+  CallEntry *e = &s_calls[s_detail_index];
+
+  // `cat` (incident type / city) is often empty in the current feed — only
+  // give it its own line when present. The trailing line hints the new nav.
+  const char *hint = "\n\n\xE2\x80\x94 UP / DOWN: prev / next \xE2\x80\x94";
+  if (e->cat[0]) {
+    snprintf(s_detail_buf, sizeof(s_detail_buf), "%s  %s\n%s\n\n%s%s",
+             e->time, e->tag, e->cat, e->text, hint);
+  } else {
+    snprintf(s_detail_buf, sizeof(s_detail_buf), "%s  %s\n\n%s%s",
+             e->time, e->tag, e->text, hint);
+  }
+  text_layer_set_text(s_detail_text, s_detail_buf);
+
+  GRect tf = layer_get_frame(text_layer_get_layer(s_detail_text));
+  GSize used = text_layer_get_content_size(s_detail_text);
+  text_layer_set_size(s_detail_text, GSize(tf.size.w, used.h + 12));
+  scroll_layer_set_content_size(s_detail_scroll, GSize(tf.size.w + 8, used.h + 20));
+  scroll_layer_set_content_offset(s_detail_scroll, GPoint(0, 0), false);
+
+  if (s_menu_layer) {
+    menu_layer_set_selected_index(s_menu_layer,
+      (MenuIndex){ .section = 0, .row = s_detail_index }, MenuRowAlignCenter, false);
+  }
+}
+
+// UP: scroll up a page; once at the top, step to the previous (newer) call.
+static void detail_up_click(ClickRecognizerRef rec, void *ctx) {
+  GPoint off = scroll_layer_get_content_offset(s_detail_scroll);
+  if (off.y < 0) {
+    int page = layer_get_frame(scroll_layer_get_layer(s_detail_scroll)).size.h - 24;
+    if (page < 24) page = 24;
+    int ny = off.y + page;
+    if (ny > 0) ny = 0;
+    scroll_layer_set_content_offset(s_detail_scroll, GPoint(0, ny), true);
+  } else if (s_detail_index > 0) {
+    s_detail_index--;
+    detail_render();
+  }
+}
+
+// DOWN: scroll down a page; once at the bottom, step to the next (older) call.
+static void detail_down_click(ClickRecognizerRef rec, void *ctx) {
+  GPoint off = scroll_layer_get_content_offset(s_detail_scroll);
+  GSize content = scroll_layer_get_content_size(s_detail_scroll);
+  int view_h = layer_get_frame(scroll_layer_get_layer(s_detail_scroll)).size.h;
+  int min_y = view_h - content.h;
+  if (min_y > 0) min_y = 0;
+  if (off.y > min_y) {
+    int page = view_h - 24;
+    if (page < 24) page = 24;
+    int ny = off.y - page;
+    if (ny < min_y) ny = min_y;
+    scroll_layer_set_content_offset(s_detail_scroll, GPoint(0, ny), true);
+  } else if (s_detail_index < s_count - 1) {
+    s_detail_index++;
+    detail_render();
+  }
+}
+
+static void detail_click_provider(void *ctx) {
+  window_single_click_subscribe(BUTTON_ID_UP, detail_up_click);
+  window_single_click_subscribe(BUTTON_ID_DOWN, detail_down_click);
+  // BACK keeps its default (pop back to the list).
+}
+
 static void detail_window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect b = layer_get_bounds(root);
 
   s_detail_scroll = scroll_layer_create(b);
-  scroll_layer_set_click_config_onto_window(s_detail_scroll, window);
-
-  CallEntry *e = &s_calls[s_detail_index];
-  // `cat` (incident type / city) is often empty in the current feed — only
-  // give it its own line when present, so the transcript isn't pushed down by
-  // a blank gap.
-  if (e->cat[0]) {
-    snprintf(s_detail_buf, sizeof(s_detail_buf), "%s  %s\n%s\n\n%s",
-             e->time, e->tag, e->cat, e->text);
-  } else {
-    snprintf(s_detail_buf, sizeof(s_detail_buf), "%s  %s\n\n%s",
-             e->time, e->tag, e->text);
-  }
-
   s_detail_text = text_layer_create(GRect(4, 2, b.size.w - 8, 2000));
-  text_layer_set_text(s_detail_text, s_detail_buf);
   text_layer_set_font(s_detail_text, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
   text_layer_set_overflow_mode(s_detail_text, GTextOverflowModeWordWrap);
-
-  GSize used = text_layer_get_content_size(s_detail_text);
-  text_layer_set_size(s_detail_text, GSize(b.size.w - 8, used.h + 12));
-  scroll_layer_set_content_size(s_detail_scroll, GSize(b.size.w, used.h + 20));
-
   scroll_layer_add_child(s_detail_scroll, text_layer_get_layer(s_detail_text));
   layer_add_child(root, scroll_layer_get_layer(s_detail_scroll));
+
+  // We drive UP/DOWN ourselves (scroll, then step between calls at the ends),
+  // so install our own click provider rather than the ScrollLayer's default.
+  window_set_click_config_provider(window, detail_click_provider);
+
+  detail_render();
 }
 
 static void detail_window_unload(Window *window) {

@@ -9,14 +9,18 @@ Companion to the PicoCalc Scanner Terminal — same backend, Pebble-native UI.
 
 ## Controls
 
-| Button            | Action                                        |
-|-------------------|-----------------------------------------------|
-| UP / DOWN         | scroll the feed                               |
-| SELECT (short)    | open the full transcript for the call         |
-| SELECT (long)     | cycle filter: **Local → Utah Co → All**       |
+| Context | Button         | Action                                            |
+|---------|----------------|---------------------------------------------------|
+| List    | UP / DOWN      | scroll the feed                                   |
+| List    | SELECT (short) | open the full transcript for the call             |
+| List    | SELECT (long)  | cycle filter: **Local → Utah Co → All**           |
+| Detail  | UP / DOWN      | scroll; at the top/bottom, step to prev/next call |
+| Detail  | BACK           | return to the list                                |
 
 The top bar shows the active filter and connection status (`live`, `offline`,
-`auth failed`, etc.).
+`auth failed`, etc.). In the list, the **talkgroup tag is color-coded by agency
+type** (police / sheriff / fire / EMS / highway patrol) on color watches, with
+emergencies shown in red; B&W watches fall back to black text.
 
 ## Filters
 
