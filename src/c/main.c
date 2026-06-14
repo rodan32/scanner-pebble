@@ -309,9 +309,12 @@ static void detail_render(void) {
   }
   text_layer_set_text(s_detail_text, s_detail_buf);
 
+  // Measure the wrapped transcript and size only the SCROLL content to it. The
+  // text layer itself stays tall (created at 2000px) so the last line is never
+  // clipped — shrinking it to the measured height tended to shave that line,
+  // which was the "text cut off" issue.
   GRect tf = layer_get_frame(text_layer_get_layer(s_detail_text));
   GSize used = text_layer_get_content_size(s_detail_text);
-  text_layer_set_size(s_detail_text, GSize(tf.size.w, used.h + 12));
   scroll_layer_set_content_size(s_detail_scroll, GSize(tf.size.w + 8, used.h + 20));
   scroll_layer_set_content_offset(s_detail_scroll, GPoint(0, 0), false);
 
@@ -365,10 +368,11 @@ static void detail_window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect b = layer_get_bounds(root);
 
-  // Fixed, color-coded header (up to two lines); transcript scrolls beneath it.
-  const int head_h = 58;
+  // Fixed, color-coded header (up to two lines, 18pt to match the list font);
+  // the transcript scrolls beneath it.
+  const int head_h = 48;
   s_detail_header = text_layer_create(GRect(4, 2, b.size.w - 8, head_h - 4));
-  text_layer_set_font(s_detail_header, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+  text_layer_set_font(s_detail_header, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
   text_layer_set_overflow_mode(s_detail_header, GTextOverflowModeTrailingEllipsis);
   layer_add_child(root, text_layer_get_layer(s_detail_header));
 
