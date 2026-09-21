@@ -1,0 +1,43 @@
+{
+  "_comment": "Canned /feed/api/* payloads for `node test/harness.js --offline`. The rows deliberately mix field shapes: `feed` carries the schema the bridge was written against, `since` carries the renamed/incident-shaped variants (transcript_clean, transcript_snippet, epoch start_time) that src/pkjs/index.js reads through its `pick` candidate lists. Both must render a complete row on the watch.",
+  "feed": {
+    "next_cursor": 0,
+    "calls": [
+      {
+        "id": 1002,
+        "time_local": "2026-09-21T14:03:22",
+        "tg_alpha_tag": "Orem/Lindon PD",
+        "incident_type": "traffic stop",
+        "severity": "low",
+        "transcript": "Show me out with Utah plate on 800 North, one occupant."
+      },
+      {
+        "id": 1001,
+        "time_local": "2026-09-21 14:01:05",
+        "tg_alpha_tag": "UtCo Fire/EMS",
+        "city": "Orem",
+        "severity": "critical",
+        "transcript": "Structure fire reported, heavy smoke showing from the rear."
+      }
+    ]
+  },
+  "since": {
+    "max_id": 1004,
+    "calls": [
+      {
+        "id": 1004,
+        "start_time": 1790000000,
+        "talkgroup": "UHP Disp",
+        "severity": "high",
+        "transcript_clean": "Rollover on southbound I-15 near the Orem exit, lanes blocked."
+      },
+      {
+        "id": 1003,
+        "time_local": "2026-09-21T14:05:40",
+        "tg": "UtCo Sher 3",
+        "incident_type": "welfare check",
+        "transcript_snippet": "Checking the welfare of an occupant at the listed address."
+      }
+    ]
+  }
+}

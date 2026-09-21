@@ -178,20 +178,56 @@ function sendStatus(text) {
   enqueue({ MSG_TYPE: MSG_STATUS, STATUS: text });
 }
 
+// First non-empty value among `names` on `obj`. The backend's feed schema has
+// already been renamed under us once (see the 2026-06 migration note above), so
+// read every field through a candidate list rather than a single hard-coded
+// name: a rename then degrades to a missing sub-field instead of a blank feed.
+function pick(obj, names) {
+  for (var i = 0; i < names.length; i++) {
+    var v = obj[names[i]];
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return '';
+}
+
+// Two-digit zero pad (no String.padStart in PebbleKit JS).
+function pad2(n) {
+  return (n < 10 ? '0' : '') + n;
+}
+
+// The watch shows a bare clock, and the row only has room for one. `time_local`
+// has arrived as an ISO stamp, a "YYYY-MM-DD HH:MM:SS" string and (for the
+// incident-shaped rows) a bare epoch int, so normalize all three to HH:MM:SS
+// rather than blind-slicing the tail — `.slice(-15)` on an ISO stamp yields
+// "9-21T14:03:22", which is what the watch used to render.
+function clockOf(raw) {
+  if (typeof raw === 'number' || /^\d{9,11}$/.test(String(raw))) {
+    var d = new Date(Number(raw) * 1000);
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+  }
+  var m = /(\d{1,2}:\d{2}(?::\d{2})?)/.exec(String(raw || ''));
+  return m ? m[1] : String(raw || '').slice(-8);
+}
+
 function sendCall(call) {
   // New feed has no `emergency` bool — derive urgency from enrichment severity.
-  var sev = call.severity || '';
+  var sev = pick(call, ['severity']);
   var emergency = (sev === 'critical' || sev === 'high') ? 1 : 0;
   // No `category` anymore; the most useful secondary line is the incident type
   // (e.g. "traffic stop") or the city, when enrichment has filled them in.
-  var cat = call.incident_type || call.city || '';
+  var cat = pick(call, ['incident_type', 'city']);
+  // `transcript_clean` is the cleaned-up text the backend prefers everywhere it
+  // renders a call; fall back to the raw transcript, then to whatever summary
+  // or snippet the row carries, so a call never lands on the watch with a blank
+  // body.
+  var text = pick(call, ['transcript_clean', 'transcript', 'transcript_snippet', 'summary']);
   enqueue({
     MSG_TYPE: MSG_CALL,
     CALL_ID: call.id,
-    CALL_TIME: String(call.time_local || '').slice(-15),
-    CALL_TAG: String(call.tg_alpha_tag || '').slice(0, 26),
+    CALL_TIME: clockOf(pick(call, ['time_local', 'start_time', 'time'])),
+    CALL_TAG: String(pick(call, ['tg_alpha_tag', 'talkgroup', 'tg'])).slice(0, 26),
     CALL_CAT: String(cat).slice(0, 18),
-    CALL_TEXT: String(call.transcript || '').slice(0, 156),
+    CALL_TEXT: String(text).slice(0, 156),
     CALL_EMERG: emergency
   });
 }

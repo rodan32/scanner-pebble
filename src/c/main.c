@@ -67,6 +67,11 @@ static TextLayer   *s_detail_header;
 static char         s_detail_buf[260];
 static char         s_detail_head[80];
 static int          s_detail_index = -1;
+// The row a call sits at shifts every time a newer call arrives, so remember
+// which CALL the detail view is showing and re-resolve its row on each insert.
+// Without this, a call landing while you read pushes your row down by one and
+// prev/next then walks over a call you already read.
+static int32_t      s_detail_id = 0;
 
 // ---------------------------------------------------------------------------
 // Talkgroup classification — color-codes the tag text by agency type so the
@@ -174,6 +179,14 @@ static void insert_call(const CallEntry *e) {
   if (s_count < MAX_CALLS) s_count++;
 }
 
+// Row currently holding this call id, or -1 if it has aged out of the buffer.
+static int find_call_index(int32_t id) {
+  for (int i = 0; i < s_count; i++) {
+    if (s_calls[i].id == id) return i;
+  }
+  return -1;
+}
+
 // ---------------------------------------------------------------------------
 // Menu layer callbacks
 // ---------------------------------------------------------------------------
@@ -237,6 +250,17 @@ static void detail_window_load(Window *window);
 static void detail_window_unload(Window *window);
 static void push_detail(int row);
 
+// Tell the phone which preset to send. The outbox holds one message and the
+// send fails outright if PebbleKit JS isn't up yet, which is exactly the race
+// at launch — see s_filter_synced in inbox_received for the recovery.
+static void send_filter(void) {
+  DictionaryIterator *out;
+  if (app_message_outbox_begin(&out) == APP_MSG_OK) {
+    dict_write_int(out, MESSAGE_KEY_FILTER, &s_filter, sizeof(int), true);
+    app_message_outbox_send();
+  }
+}
+
 static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
   if (s_count == 0) return;
   push_detail(idx->row);
@@ -247,6 +271,7 @@ static void cycle_filter(void) {
   // Clear the cache so the new preset starts clean; JS resets its lastMaxId to
   // match and resends the current window for this filter.
   s_count = 0;
+  s_detail_id = 0;   // the call it pointed at is gone with the cache
   if (s_menu_layer) {
     menu_layer_reload_data(s_menu_layer);
     menu_layer_set_selected_index(s_menu_layer,
@@ -256,12 +281,7 @@ static void cycle_filter(void) {
   update_status_layer();
   save_state();
 
-  // Tell the phone which preset to send now.
-  DictionaryIterator *out;
-  if (app_message_outbox_begin(&out) == APP_MSG_OK) {
-    dict_write_int(out, MESSAGE_KEY_FILTER, &s_filter, sizeof(int), true);
-    app_message_outbox_send();
-  }
+  send_filter();
   vibes_short_pulse();
 }
 
@@ -274,6 +294,7 @@ static void menu_select_long_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
 // ---------------------------------------------------------------------------
 static void push_detail(int row) {
   s_detail_index = row;
+  s_detail_id = s_calls[row].id;
   if (!s_detail_window) {
     s_detail_window = window_create();
     window_set_window_handlers(s_detail_window, (WindowHandlers){
@@ -336,6 +357,7 @@ static void detail_up_click(ClickRecognizerRef rec, void *ctx) {
     scroll_layer_set_content_offset(s_detail_scroll, GPoint(0, ny), true);
   } else if (s_detail_index > 0) {
     s_detail_index--;
+    s_detail_id = s_calls[s_detail_index].id;
     detail_render();
   }
 }
@@ -355,6 +377,7 @@ static void detail_down_click(ClickRecognizerRef rec, void *ctx) {
     scroll_layer_set_content_offset(s_detail_scroll, GPoint(0, ny), true);
   } else if (s_detail_index < s_count - 1) {
     s_detail_index++;
+    s_detail_id = s_calls[s_detail_index].id;
     detail_render();
   }
 }
@@ -413,7 +436,20 @@ static void copy_tuple_str(DictionaryIterator *it, uint32_t key, char *dst, size
   }
 }
 
+// Cleared until the phone has proved it is listening (any inbound message).
+static bool s_filter_synced = false;
+
 static void inbox_received(DictionaryIterator *iter, void *context) {
+  // init()'s filter send is dropped if PebbleKit JS hasn't booted yet, and JS
+  // then falls back to DEFAULT_FILTER from settings — leaving the watch showing
+  // one preset while the phone fetches another. The first inbound message means
+  // JS is alive, so re-send the filter then. Costs one extra seed per launch;
+  // buys a status bar that can't lie about what's being fetched.
+  if (!s_filter_synced) {
+    s_filter_synced = true;
+    send_filter();
+  }
+
   Tuple *type_t = dict_find(iter, MESSAGE_KEY_MSG_TYPE);
   int type = type_t ? type_t->value->int32 : MSG_CALL;
 
@@ -444,6 +480,14 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   bool was_empty = (s_count == 0);
   insert_call(&e);
 
+  // A newer call shifts every older row down one. Re-pin the detail view to the
+  // call the user is actually reading so prev/next keeps stepping through the
+  // feed instead of re-showing the call they just left.
+  if (s_detail_id) {
+    int row = find_call_index(s_detail_id);
+    if (row >= 0) s_detail_index = row;
+  }
+
   snprintf(s_status, sizeof(s_status), "live");
   update_status_layer();
 
@@ -462,6 +506,22 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
 static void inbox_dropped(AppMessageResult reason, void *context) {
   snprintf(s_status, sizeof(s_status), "msg dropped");
   update_status_layer();
+}
+
+// A failed filter send leaves the status bar stuck on "switching..." forever,
+// which reads as a hung app. Say so instead; the next inbound message re-syncs.
+static void outbox_failed(DictionaryIterator *iter, AppMessageResult reason,
+                          void *context) {
+  // init()'s send losing the race with PebbleKit JS boot is the expected path,
+  // not a fault — don't cry "phone?" over it, the first inbound message is
+  // moments away and re-syncs. Only report a send that failed once the phone
+  // had already been talking to us, which is the case that otherwise strands
+  // the status bar on "switching...".
+  if (s_filter_synced) {
+    snprintf(s_status, sizeof(s_status), "phone?");
+    update_status_layer();
+  }
+  s_filter_synced = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -517,16 +577,12 @@ static void init(void) {
 
   app_message_register_inbox_received(inbox_received);
   app_message_register_inbox_dropped(inbox_dropped);
+  app_message_register_outbox_failed(outbox_failed);
   app_message_open(2048, 128);
 
-  // Tell the phone our active filter as soon as JS is ready. The JS side also
-  // asks for it on launch, but sending here covers the case where JS came up
-  // first.
-  DictionaryIterator *out;
-  if (app_message_outbox_begin(&out) == APP_MSG_OK) {
-    dict_write_int(out, MESSAGE_KEY_FILTER, &s_filter, sizeof(int), true);
-    app_message_outbox_send();
-  }
+  // Covers the case where JS came up first. If it didn't, this send fails and
+  // inbox_received re-sends on first contact.
+  send_filter();
 }
 
 static void deinit(void) {

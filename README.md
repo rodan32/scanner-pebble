@@ -13,7 +13,7 @@ Companion to the PicoCalc Scanner Terminal — same backend, Pebble-native UI.
 |---------|----------------|---------------------------------------------------|
 | List    | UP / DOWN      | scroll the feed                                   |
 | List    | SELECT (short) | open the full transcript for the call             |
-| List    | SELECT (long)  | cycle filter: **Local → Utah Co → All**           |
+| List    | SELECT (long)  | cycle filter: **Local → Utah Co → All → Faves**   |
 | Detail  | UP / DOWN      | scroll; at the top/bottom, step to prev/next call |
 | Detail  | BACK           | return to the list                                |
 
@@ -144,16 +144,64 @@ tells you where it was pointed. When stuck, a temporary status that reports
 *lengths* of stored values (never the values themselves) is a safe way to see
 what's actually in storage.
 
+### 7. The launch-time AppMessage handshake is a race, and it fails silently
+
+The watch sends its persisted filter to the phone in `init()`. If PebbleKit JS
+hasn't booted yet that send just fails — and JS then falls back to
+`DEFAULT_FILTER` from settings, so the watch's status bar says **Faves** while
+the phone is fetching **Local**. Nothing errors; the feed is simply the wrong
+one.
+
+Two things fix it, and you want both: register an
+`app_message_register_outbox_failed` handler (otherwise a failed send leaves the
+status stuck on `switching...`, which reads as a hung app), and re-send the
+filter on the *first inbound message*, which is the only reliable proof the
+phone is listening. See `s_filter_synced` in `src/c/main.c`.
+
+### 8. Read feed fields through a candidate list, not a fixed name
+
+This app's backend renamed its feed schema out from under it once already
+(gotcha above). Reading `call.transcript` directly means a rename shows up as a
+watch full of blank rows. Reading
+`pick(call, ['transcript_clean', 'transcript', …])` means it shows up as one
+missing sub-field, and the app keeps working while you catch up.
+
+## Pre-flight checks (no SDK, no watch, no network)
+
+```
+sh test/check.sh
+```
+
+Type-checks `src/c/main.c` against `test/stub/pebble.h` (a hand-written
+stand-in for the SDK header) in **both** the color and B&W configurations,
+syntax-checks the JS, then runs the bridge against canned feed payloads. A
+clean run proves the code parses and type-checks — it is *not* a build, and
+says nothing about on-device behaviour. Run it before every push; it is far
+cheaper than a CloudPebble round trip.
+
 ## Testing the JS bridge (no watch needed)
 
 `test/harness.js` mocks the Pebble runtime, loads the real `src/pkjs/index.js`,
-and routes its `data.zarchstuff.com` requests to the internal analytics
-container (CT137, no auth) so you can see the exact AppMessages the watch would
-receive:
+and prints the exact AppMessages the watch would receive.
 
 ```
-node test/harness.js local   # or: utco | all
+node test/harness.js local --offline      # canned payloads, no network
+node test/harness.js local                # or: utco | all | fav
+FAVE_AREAS="Orem, UHP" node test/harness.js fav
 ```
+
+`--offline` serves `test/fixtures.json` instead of the network, so it runs
+anywhere. The other modes route the app's `data.zarchstuff.com` requests to the
+internal analytics container (CT137, no auth), which needs LAN access but hits
+the real query paths.
+
+The fixtures deliberately mix field shapes — `transcript` vs `transcript_clean`
+vs `transcript_snippet`, `tg_alpha_tag` vs `talkgroup` vs `tg`, an ISO
+`time_local` vs a bare epoch `start_time`. The bridge reads every field through
+a candidate list (`pick()` in `index.js`), so a backend rename degrades to one
+blank sub-field rather than an empty feed. **When the feed schema changes, add
+the new shape to `fixtures.json` and run `--offline` before touching anything
+else** — that is the cheapest way to find out what the watch would render.
 
 ## Build & install (CloudPebble)
 
@@ -185,7 +233,7 @@ This repo is the source of truth; CloudPebble is the build/flash backend
 | `CALL_TEXT`  | JS→watch  | transcript (truncated ~156 chars)        |
 | `CALL_EMERG` | JS→watch  | 1 if severity is high/critical           |
 | `STATUS`     | JS→watch  | connection/status text                   |
-| `FILTER`     | watch→JS  | 0 = Local, 1 = Utah Co, 2 = All          |
+| `FILTER`     | watch→JS  | 0 = Local, 1 = Utah Co, 2 = All, 3 = Faves |
 
 ## Roadmap
 

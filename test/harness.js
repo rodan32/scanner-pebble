@@ -11,7 +11,12 @@
 // container (CT137) over http, which bypasses the NPM basic-auth gate — so we
 // test the exact production paths + query params without needing creds.
 //
-//   node test/harness.js [local|utco|all]
+//   node test/harness.js [local|utco|all|fav]
+//
+// Pass --offline to serve canned payloads from test/fixtures.json instead of
+// the LAN. That needs no network at all, so it runs anywhere (and in CI) and is
+// the way to check the field mapping against a feed shape before the backend
+// actually serves it — add the new shape to fixtures.json and run it.
 // ---------------------------------------------------------------------------
 'use strict';
 const http = require('http');
@@ -20,9 +25,18 @@ const Module = require('module');
 
 const INTERNAL = { host: '192.168.0.177', port: 80 }; // CT137 analytics, no auth
 const PROD_HOST = 'data.zarchstuff.com';
-const filterArg = (process.argv[2] || 'local').toLowerCase();
-const FILTER = { local: 0, utco: 1, all: 2 }[filterArg];
-if (FILTER === undefined) { console.error('filter must be local|utco|all'); process.exit(1); }
+const OFFLINE = process.argv.includes('--offline');
+const filterArg = (process.argv.slice(2).find((a) => !a.startsWith('--')) || 'local').toLowerCase();
+const FILTER = { local: 0, utco: 1, all: 2, fav: 3 }[filterArg];
+if (FILTER === undefined) { console.error('filter must be local|utco|all|fav'); process.exit(1); }
+// `fav` reads the preset from FAVE_AREAS rather than a built-in list, so let it
+// be supplied per-run: FAVE_AREAS="Orem, UHP" node test/harness.js fav
+const FAVE_AREAS = process.env.FAVE_AREAS || 'Orem, Provo';
+const MUTE_TAGS = process.env.MUTE_TAGS || '';
+
+const FIXTURES = OFFLINE
+  ? JSON.parse(require('fs').readFileSync(path.join(__dirname, 'fixtures.json'), 'utf8'))
+  : null;
 
 // --- mock: localStorage -----------------------------------------------------
 const store = {};
@@ -30,8 +44,16 @@ global.localStorage = {
   getItem: (k) => (k in store ? store[k] : null),
   setItem: (k, v) => { store[k] = String(v); },
 };
+// USERNAME must be non-empty: the bridge short-circuits to 'set creds' before
+// it ever issues a request, since a missing credential against the real host is
+// a guaranteed 401. Neither the internal container nor --offline checks it, so
+// any placeholder does; override for a run against something that does check.
 store['config'] = JSON.stringify({
-  HOST: PROD_HOST, USERNAME: '', PASSWORD: '', DEFAULT_FILTER: FILTER,
+  HOST: PROD_HOST,
+  USERNAME: process.env.SCANNER_USER || 'harness',
+  PASSWORD: process.env.SCANNER_PASS || '',
+  DEFAULT_FILTER: FILTER,
+  FAVE_AREAS, MUTE_TAGS,
 });
 
 // --- mock: XMLHttpRequest (routes PROD_HOST -> internal CT137 over http) -----
@@ -45,6 +67,18 @@ global.XMLHttpRequest = function () {
     const u = new URL(this._url);
     const reqPath = u.pathname + u.search;
     console.log(`  → GET https://${u.host}${reqPath}`);
+    if (OFFLINE) {
+      // Match the fixture by endpoint: /feed/api/feed is the seed, /since the
+      // live tail. Reply on a later tick so the bridge's async flow is the same
+      // as it is against a real server.
+      const key = reqPath.indexOf('/since') >= 0 ? 'since' : 'feed';
+      setImmediate(() => {
+        this.status = 200;
+        this.responseText = JSON.stringify(FIXTURES[key]);
+        if (this.onload) this.onload();
+      });
+      return;
+    }
     const req = http.request({
       host: INTERNAL.host, port: INTERNAL.port, path: reqPath,
       method: this._method || 'GET', headers: this._headers,
@@ -95,21 +129,15 @@ Module._load = function (request, parent, isMain) {
 };
 
 // --- load the real bridge and drive it --------------------------------------
-console.log(`\n== Scanner Feed bridge test — filter=${filterArg.toUpperCase()} ==`);
+console.log(`\n== Scanner Feed bridge test — filter=${filterArg.toUpperCase()}`
+            + `${OFFLINE ? ' (offline fixtures)' : ''} ==`);
 require(path.join(__dirname, '..', 'src', 'pkjs', 'index.js'));
 
 // 'ready' kicks off startPolling() -> first poll() does the seed (history).
 fire('ready');
 
-// Give the seed request time, then simulate one live-tail poll cycle and exit.
-setTimeout(() => {
-  console.log('\n-- simulating a live-tail poll (since cursor) --');
-  // Re-fire ready would reseed; instead poke the internal poll by faking the
-  // interval: easiest is to dispatch a no-op appmessage that re-runs poll via
-  // applyFilter to the SAME filter (reseeds) — but to test /since we just wait
-  // for the module's own setInterval (POLL_MS=10s) to fire once.
-}, 1500);
-
+// The bridge's own setInterval (POLL_MS = 10s) fires the live-tail /since call,
+// so just stay alive long enough to watch one land, then report and exit.
 setTimeout(() => {
   console.log(`\n== done — ${sent} AppMessage(s) sent to the watch ==`);
   process.exit(0);
