@@ -36,6 +36,12 @@
 // MSG_TYPE values (JS -> watch)
 #define MSG_CALL   0
 #define MSG_STATUS 1
+// "Drop what you are holding, a different view starts now." Only the WATCH used
+// to clear the list, on its own long-press. A view change originating on the
+// PHONE — at launch, or from a settings save — left the previous view's rows in
+// place and merged the new ones in, so a Home list could show rows the home
+// block never produced, under a label that said Home.
+#define MSG_RESET  2
 
 // Views (watch -> JS via MESSAGE_KEY_FILTER). 0-3 are incident-grain home-log
 // scopes widening outward from the home block; 4 is the live call tail.
@@ -55,10 +61,12 @@ static const char *VIEW_NAMES[VIEW_COUNT] = {
 #define CMD_CLOSE_INCIDENT 2
 
 // Relevance tiers (JS -> watch via MESSAGE_KEY_CALL_TIER), highest first.
+// Ranks, not names — the phone maps the backend's tier strings onto these, so
+// rank 1 is near_home_area from the home log or broader_orem from a live call.
 #define TIER_HOME_BLOCK 4
 #define TIER_WARD       3
 #define TIER_GRID       2
-#define TIER_BROADER    1
+#define TIER_NEARBY     1
 
 // Persistence keys
 #define PKEY_VERSION 1
@@ -141,7 +149,7 @@ static GColor tier_color(uint8_t tier) {
     case TIER_HOME_BLOCK: return GColorRed;
     case TIER_WARD:       return GColorOrange;
     case TIER_GRID:       return GColorYellow;
-    case TIER_BROADER:    return GColorCobaltBlue;
+    case TIER_NEARBY:     return GColorCobaltBlue;
     default:              return GColorClear;
   }
 }
@@ -718,6 +726,27 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
 
   Tuple *type_t = dict_find(iter, MESSAGE_KEY_MSG_TYPE);
   int type = type_t ? type_t->value->int32 : MSG_CALL;
+
+  if (type == MSG_RESET) {
+    // The phone is authoritative about which view it is actually fetching, so
+    // adopt its number rather than trusting our own — that is the whole point
+    // of the message. Persist it so a relaunch agrees with the phone too.
+    Tuple *v = dict_find(iter, MESSAGE_KEY_FILTER);
+    if (v) {
+      int nv = v->value->int32;
+      if (nv >= 0 && nv < VIEW_COUNT) s_filter = nv;
+    }
+    s_count = 0;
+    s_detail_id = 0;
+    if (s_menu_layer) {
+      menu_layer_reload_data(s_menu_layer);
+      menu_layer_set_selected_index(s_menu_layer,
+        (MenuIndex){0, 0}, MenuRowAlignTop, false);
+    }
+    update_status_layer();
+    save_state();
+    return;
+  }
 
   if (type == MSG_STATUS) {
     Tuple *s = dict_find(iter, MESSAGE_KEY_STATUS);

@@ -105,6 +105,7 @@ global.XMLHttpRequest = function () {
 // 200px wide in Gothic 18, which is roughly 30 characters a line: an incident
 // row gets two lines of summary, a call row one. Getting that clamp wrong is
 // how a feed ends up as a list of bare timestamps.
+let openInc = 0;      // set while the drill-down simulation is active
 const ROW_COLS = 30;
 const TIER_MARK = ['   ', ' : ', ' : ', ' | ', '###'];  // 0..4, 4 = home block
 
@@ -153,6 +154,8 @@ global.Pebble = {
     sent++;
     if (msg.MSG_TYPE === 1) {
       console.log(`  [status] ${msg.STATUS}`);
+    } else if (msg.MSG_TYPE === 2) {
+      console.log(`  [reset] list cleared, view -> ${msg.FILTER}`);
     } else {
       console.log(renderRow(msg));
     }
@@ -183,7 +186,6 @@ fire('ready');
 
 // --offline --open: simulate the watch pressing SELECT on an incident, which is
 // the only way to exercise the drill-down path without a watch.
-let openInc = 0;
 const OPEN_INC = (() => {
   const i = process.argv.indexOf('--open');
   return i >= 0 ? Number(process.argv[i + 1]) : 0;

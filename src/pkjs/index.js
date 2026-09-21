@@ -30,6 +30,12 @@ var clay = new Clay(clayConfig, null, { autoHandleEvents: false });
 // MSG_TYPE values (must match main.c)
 var MSG_CALL = 0;
 var MSG_STATUS = 1;
+// "Drop what you are holding, a different view starts now." The watch only ever
+// cleared its list when the WATCH cycled the view — so a view change coming
+// from the phone (launch, or a settings save) left the old view's rows in place
+// and merged the new ones in underneath. A Home list would then show rows the
+// home block never produced.
+var MSG_RESET = 2;
 
 // Views (must match main.c). 0-3 are incident-grain home-log scopes, widening
 // outward from the home block; 4 is the call-grain live tail. Incidents lead
@@ -247,10 +253,16 @@ function clockOf(raw, hm) {
 //
 // Sent as a small int because the watch sorts and colours on it; 0 covers both
 // 'external' and a row the enricher hasn't scored yet.
+// These names are the home log's own vocabulary (HOME_LOG_SCOPES / _TIER_LABELS
+// in analytics/app/home_log.py). near_home_area was missing here, so every
+// ~1-mile incident scored 0 — no accent bar, and ranked below a broader_orem
+// row. broader_orem is a call-grain tier the home log never returns, kept only
+// so a live call carrying it still ranks.
 var TIER_RANK = {
   home_block: 4,
   ward_household: 3,
   neighborhood_grid: 2,
+  near_home_area: 1,
   broader_orem: 1,
   external: 0
 };
@@ -624,8 +636,8 @@ function applyView(v) {
   if (isNaN(v) || v < 0 || v >= VIEW_COUNT) return;
   activeView = v;
   openIncidentId = 0;
-  lastMaxId = 0;  // watch cleared its cache on switch — reseed for the new view
-  startPolling();
+  lastMaxId = 0;  // reseed for the new view
+  startPolling(true);
 }
 
 // The watch asks to open an incident; reply with its member calls and stop
@@ -642,8 +654,12 @@ function closeIncident() {
   startPolling();
 }
 
-function startPolling() {
+// `reset` announces a genuine change of view, so the watch drops the previous
+// view's rows and re-labels itself. Omitted when merely resuming the same view
+// (backing out of an incident), where clearing would only cause a flash.
+function startPolling(reset) {
   if (pollTimer) clearInterval(pollTimer);
+  if (reset) enqueue({ MSG_TYPE: MSG_RESET, FILTER: activeView });
   // Announce the target host on launch so the watch confirms which backend
   // it's hitting (i.e. that the transcripts->data migration fired). The first
   // poll result overwrites this a moment later.
@@ -660,7 +676,7 @@ Pebble.addEventListener('ready', function () {
   var cfg = getConfig();
   var df = parseInt(cfg.DEFAULT_FILTER, 10);
   activeView = (isNaN(df) || df < 0 || df >= VIEW_COUNT) ? VIEW_HOME : df;
-  startPolling();
+  startPolling(true);
 });
 
 // CMD values (must match main.c)

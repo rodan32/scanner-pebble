@@ -100,6 +100,23 @@ block, orange ward, yellow neighborhood, blue nearby — with severity only
 tinting the text, and a home-block incident spelling it out in the detail
 header so B&W watches get it too.
 
+### The phone owns which view is live
+
+The watch used to clear its list only on its own long-press. A view change
+coming from the **phone** — at launch, or from a settings save — left the
+previous view's rows in place and merged the new ones in underneath, so a Home
+list could show rows the home block never produced, under a label that said
+Home.
+
+`MSG_RESET` fixes it: the phone announces a genuine change of view, and the
+watch drops its rows and adopts the phone's view number. The phone is
+authoritative because it is the thing actually issuing the request — the watch's
+label can otherwise disagree with the scope being fetched, which is exactly the
+failure that is impossible to spot from the screen.
+
+It is **not** sent when merely resuming the same view (backing out of an
+incident), where clearing would only cause a flash.
+
 ### Junk never reaches the watch
 
 Two of the backend's own conventions have to be respected on the phone, or the
@@ -240,7 +257,8 @@ This repo is the source of truth; CloudPebble is the build/flash backend
 | `CALL_TEXT`  | JS→watch  | summary or transcript (~156 chars)            |
 | `CALL_EMERG` | JS→watch  | 1 if severity is high/critical                |
 | `STATUS`     | JS→watch  | connection/status text                        |
-| `FILTER`     | watch→JS  | view 0-4 (Home…Live)                          |
+| `FILTER`     | both      | view 0-4 (Home…Live)                          |
+| `MSG_TYPE` 2 | JS→watch  | reset: drop the list, adopt `FILTER` as the view |
 | `CMD`        | watch→JS  | 1 = open incident (with `CALL_INC`), 2 = back |
 
 `CALL_ORD` exists because the home log's `event_key` is not guaranteed to run
