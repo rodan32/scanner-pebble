@@ -13,7 +13,7 @@ Companion to the PicoCalc Scanner Terminal — same backend, Pebble-native UI.
 |---------|----------------|---------------------------------------------------|
 | List    | UP / DOWN      | scroll the feed                                   |
 | List    | SELECT (short) | open the full transcript for the call             |
-| List    | SELECT (long)  | cycle filter: **Local → Utah Co → All → Faves**   |
+| List    | SELECT (long)  | cycle: **Home → Local → Utah Co → All → Faves**   |
 | Detail  | UP / DOWN      | scroll; at the top/bottom, step to prev/next call |
 | Detail  | BACK           | return to the list                                |
 
@@ -29,6 +29,12 @@ Filtering is by **area** — the backend resolves each area chip to `tg_alpha_ta
 substrings (`analytics/app/areas.py`). The presets map to area lists in
 `src/pkjs/index.js`:
 
+- **Home** — *the default.* Strictly the home city (`HOME_AREAS`, default
+  `Orem`). This mirrors the backend's own `MY_AREA_DEFAULT`; the `Orem` chip
+  already resolves to Orem/Lindon PD plus Orem Fire and the shared POL Fire
+  dispatch, so one chip really is police + fire for home. Unlike Faves, an
+  empty setting falls back to the built-in home area rather than widening to
+  All — the default preset must never quietly become "everything".
 - **Local** — busiest nearby agencies: Orem, Lehi, American Fork, UtCo Sheriff,
   UtCo Fire/EMS. (Orem/Lindon PD is by far the highest-volume TG, so this
   preset always has a steady feed.)
@@ -51,7 +57,8 @@ typing `none` clears it.
   live-tails `/feed/api/since?after_id=` every 10s, sending one AppMessage per
   call. Basic-auth creds come from settings.
 - `src/pkjs/config.js` — Clay settings page (host / user / password / default
-  filter / favorite areas / muted talkgroups). Nothing sensitive is committed.
+  filter / home areas / favorite areas / muted talkgroups). Nothing sensitive is
+  committed.
 
 The watch can't reach the LAN directly — all network access is through the
 phone (PebbleKit JS). The backend is public over HTTPS (Cloudflare + NPM basic
@@ -185,9 +192,9 @@ cheaper than a CloudPebble round trip.
 and prints the exact AppMessages the watch would receive.
 
 ```
-node test/harness.js local --offline      # canned payloads, no network
-node test/harness.js local                # or: utco | all | fav
-FAVE_AREAS="Orem, UHP" node test/harness.js fav
+node test/harness.js home --offline       # canned payloads, no network
+node test/harness.js home                 # or: local | utco | all | fav
+HOME_AREAS="Orem, Lindon" node test/harness.js home
 ```
 
 `--offline` serves `test/fixtures.json` instead of the network, so it runs
@@ -233,7 +240,7 @@ This repo is the source of truth; CloudPebble is the build/flash backend
 | `CALL_TEXT`  | JS→watch  | transcript (truncated ~156 chars)        |
 | `CALL_EMERG` | JS→watch  | 1 if severity is high/critical           |
 | `STATUS`     | JS→watch  | connection/status text                   |
-| `FILTER`     | watch→JS  | 0 = Local, 1 = Utah Co, 2 = All, 3 = Faves |
+| `FILTER`     | watch→JS  | 0 = Home, 1 = Local, 2 = Utah Co, 3 = All, 4 = Faves |
 
 ## Roadmap
 

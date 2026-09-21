@@ -26,7 +26,7 @@ done
 echo "   ok"
 
 echo "== JS: bridge against canned feed payloads =="
-node test/harness.js local --offline
+node test/harness.js home --offline
 
 echo "
 all checks passed"

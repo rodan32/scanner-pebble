@@ -11,7 +11,7 @@
 // container (CT137) over http, which bypasses the NPM basic-auth gate — so we
 // test the exact production paths + query params without needing creds.
 //
-//   node test/harness.js [local|utco|all|fav]
+//   node test/harness.js [home|local|utco|all|fav]
 //
 // Pass --offline to serve canned payloads from test/fixtures.json instead of
 // the LAN. That needs no network at all, so it runs anywhere (and in CI) and is
@@ -26,11 +26,14 @@ const Module = require('module');
 const INTERNAL = { host: '192.168.0.177', port: 80 }; // CT137 analytics, no auth
 const PROD_HOST = 'data.zarchstuff.com';
 const OFFLINE = process.argv.includes('--offline');
-const filterArg = (process.argv.slice(2).find((a) => !a.startsWith('--')) || 'local').toLowerCase();
-const FILTER = { local: 0, utco: 1, all: 2, fav: 3 }[filterArg];
-if (FILTER === undefined) { console.error('filter must be local|utco|all|fav'); process.exit(1); }
+const filterArg = (process.argv.slice(2).find((a) => !a.startsWith('--')) || 'home').toLowerCase();
+const FILTER = { home: 0, local: 1, utco: 2, all: 3, fav: 4 }[filterArg];
+if (FILTER === undefined) {
+  console.error('filter must be home|local|utco|all|fav'); process.exit(1);
+}
 // `fav` reads the preset from FAVE_AREAS rather than a built-in list, so let it
 // be supplied per-run: FAVE_AREAS="Orem, UHP" node test/harness.js fav
+const HOME_AREAS = process.env.HOME_AREAS || 'Orem';
 const FAVE_AREAS = process.env.FAVE_AREAS || 'Orem, Provo';
 const MUTE_TAGS = process.env.MUTE_TAGS || '';
 
@@ -53,7 +56,7 @@ store['config'] = JSON.stringify({
   USERNAME: process.env.SCANNER_USER || 'harness',
   PASSWORD: process.env.SCANNER_PASS || '',
   DEFAULT_FILTER: FILTER,
-  FAVE_AREAS, MUTE_TAGS,
+  HOME_AREAS, FAVE_AREAS, MUTE_TAGS,
 });
 
 // --- mock: XMLHttpRequest (routes PROD_HOST -> internal CT137 over http) -----

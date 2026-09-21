@@ -2,7 +2,7 @@
 // Scanner Feed — PebbleKit JS bridge (runs on the phone)
 //
 // Polls the scanner backend's live-tail feed, filters by the active preset
-// (Local / Utah Co / All / Favorites), optionally drops muted talkgroups, and
+// (Home / Local / Utah Co / All / Favorites), optionally drops muted talkgroups, and
 // pushes one AppMessage per call to the watch. Credentials, host, favorite
 // areas and muted talkgroups come from the Clay settings page (config.js).
 //
@@ -26,25 +26,32 @@ var MSG_CALL = 0;
 var MSG_STATUS = 1;
 
 // Filter presets (must match main.c)
-var FILTER_LOCAL = 0;
-var FILTER_UTCO = 1;
-var FILTER_ALL = 2;
-var FILTER_FAV = 3;   // user-configured "Favorites" areas (FAVE_AREAS setting)
+var FILTER_HOME = 0;  // strict home area (HOME_AREAS setting) — the default
+var FILTER_LOCAL = 1;
+var FILTER_UTCO = 2;
+var FILTER_ALL = 3;
+var FILTER_FAV = 4;   // user-configured "Favorites" areas (FAVE_AREAS setting)
 
 // Filter -> backend `areas` chips (keys from analytics/app/areas.py). The
 // backend resolves each area to tg_alpha_tag substrings, so we think in
 // agencies, not talkgroup numbers. ALL sends no area filter (everything).
 //
+//   Home    = just the home city, and the default. Mirrors the backend's own
+//             MY_AREA_DEFAULT (["Orem"]); the "Orem" chip already resolves to
+//             Orem/Lindon PD plus Orem Fire and the shared POL Fire dispatch,
+//             so one chip is genuinely police + fire for home. Override with
+//             the HOME_AREAS setting.
 //   Local   = the busiest nearby agencies — guarantees a steady feed.
 //             (Orem/Lindon PD is by far the highest-volume TG.)
 //   Utah Co = every Utah-County-area chip.
+var DEFAULT_HOME_AREAS = 'Orem';
 var LOCAL_AREAS = ['Orem', 'Lehi', 'American Fork', 'UtCo Sheriff', 'UtCo Fire/EMS'];
 var UTCO_AREAS = ['Orem', 'Provo', 'Lehi', 'American Fork', 'Springville',
                   'Spanish Fork', 'UtCo Sheriff', 'UtCo Fire/EMS'];
 
 var SEED_LIMIT = 24;     // history to pull on launch / filter switch (= watch MAX_CALLS)
 var POLL_MS = 10000;
-var activeFilter = FILTER_LOCAL;
+var activeFilter = FILTER_HOME;
 var lastMaxId = 0;       // server-side cursor: highest call id we've sent
 var pollTimer = null;
 
@@ -75,7 +82,8 @@ function getConfig() {
     HOST: DEFAULT_HOST,
     USERNAME: '',
     PASSWORD: '',
-    DEFAULT_FILTER: FILTER_LOCAL,
+    DEFAULT_FILTER: FILTER_HOME,
+    HOME_AREAS: DEFAULT_HOME_AREAS,  // area chips for the strict Home preset
     FAVE_AREAS: '',   // comma-separated area chips for the Favorites preset
     MUTE_TAGS: ''     // comma-separated tag substrings to drop from the feed
   };
@@ -261,6 +269,13 @@ function areaParam(cfg) {
     if (!fav.length) return '';  // no favorites configured -> behave like All
     return '&areas=' + encodeURIComponent(fav.join(','));
   }
+  if (activeFilter === FILTER_HOME) {
+    // Home is the default preset, so it must never silently widen to All the
+    // way Faves does — an empty setting falls back to the built-in home area.
+    var home = parseList(cfg.HOME_AREAS);
+    if (!home.length) home = parseList(DEFAULT_HOME_AREAS);
+    return '&areas=' + encodeURIComponent(home.join(','));
+  }
   var areas = (activeFilter === FILTER_UTCO) ? UTCO_AREAS : LOCAL_AREAS;
   return '&areas=' + encodeURIComponent(areas.join(','));
 }
@@ -355,7 +370,8 @@ function startPolling() {
 // ---------------------------------------------------------------------------
 Pebble.addEventListener('ready', function () {
   var cfg = getConfig();
-  activeFilter = parseInt(cfg.DEFAULT_FILTER, 10) || FILTER_LOCAL;
+  var df = parseInt(cfg.DEFAULT_FILTER, 10);
+  activeFilter = isNaN(df) ? FILTER_HOME : df;
   startPolling();
 });
 
@@ -397,6 +413,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
   var user = String(settingValue(settings, 'USERNAME')).trim();
   var pass = String(settingValue(settings, 'PASSWORD'));
   var df = parseInt(settingValue(settings, 'DEFAULT_FILTER'), 10);
+  var home = String(settingValue(settings, 'HOME_AREAS')).trim();
   var fave = String(settingValue(settings, 'FAVE_AREAS')).trim();
   var mute = String(settingValue(settings, 'MUTE_TAGS')).trim();
 
@@ -413,6 +430,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     USERNAME: user || prev.USERNAME,
     PASSWORD: pass || prev.PASSWORD,
     DEFAULT_FILTER: isNaN(df) ? prev.DEFAULT_FILTER : df,
+    HOME_AREAS: listField(home, prev.HOME_AREAS) || DEFAULT_HOME_AREAS,
     FAVE_AREAS: listField(fave, prev.FAVE_AREAS),
     MUTE_TAGS: listField(mute, prev.MUTE_TAGS)
   };

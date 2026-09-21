@@ -34,11 +34,18 @@ module.exports = [
         label: 'Default filter',
         defaultValue: '0',
         options: [
-          { label: 'Local', value: '0' },
-          { label: 'Utah Co', value: '1' },
-          { label: 'All', value: '2' },
-          { label: 'Faves', value: '3' }
+          { label: 'Home', value: '0' },
+          { label: 'Local', value: '1' },
+          { label: 'Utah Co', value: '2' },
+          { label: 'All', value: '3' },
+          { label: 'Faves', value: '4' }
         ]
+      },
+      {
+        type: 'input',
+        messageKey: 'HOME_AREAS',
+        label: 'Home areas',
+        attributes: { placeholder: 'Orem' }
       },
       {
         type: 'input',
@@ -52,7 +59,7 @@ module.exports = [
         label: 'Mute talkgroups',
         attributes: { placeholder: 'Orem PD, Dispatch' }
       },
-      { type: 'text', defaultValue: 'Favorite areas: comma-separated agency/area names for the "Faves" preset (same names as the built-in presets, e.g. Orem, Provo, UHP). Mute talkgroups: comma-separated text — any call whose talkgroup contains one of these is hidden. Both fields show blank on open; leaving one blank keeps the current value, and typing "none" clears it.' }
+      { type: 'text', defaultValue: 'Home areas: the strict home-area list behind the default "Home" preset — keep it narrow (default: Orem). Favorite areas: comma-separated agency/area names for the "Faves" preset (same names as the built-in presets, e.g. Orem, Provo, UHP). Mute talkgroups: comma-separated text — any call whose talkgroup contains one of these is hidden. All three fields show blank on open; leaving one blank keeps the current value, and typing "none" clears it (Home falls back to Orem).' }
     ]
   },
   { type: 'submit', defaultValue: 'Save' }

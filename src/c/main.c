@@ -14,7 +14,7 @@
 // Controls:
 //   List:   UP / DOWN        scroll the feed
 //           SELECT (short)   open the full transcript for the highlighted call
-//           SELECT (long)    cycle filter: Local -> Utah Co -> All -> Faves
+//           SELECT (long)    cycle filter: Home -> Local -> Utah Co -> All -> Faves
 //   Detail: UP / DOWN        scroll; at the top/bottom, step to prev/next call
 //           BACK             return to the list
 // ---------------------------------------------------------------------------
@@ -26,13 +26,16 @@
 #define MSG_STATUS 1
 
 // Filter presets (watch -> JS via MESSAGE_KEY_FILTER)
-#define FILTER_LOCAL 0
-#define FILTER_UTCO  1
-#define FILTER_ALL   2
-#define FILTER_FAV   3
-#define FILTER_COUNT 4
+#define FILTER_HOME  0   // strict home area — the default
+#define FILTER_LOCAL 1
+#define FILTER_UTCO  2
+#define FILTER_ALL   3
+#define FILTER_FAV   4
+#define FILTER_COUNT 5
 
-static const char *FILTER_NAMES[FILTER_COUNT] = { "Local", "Utah Co", "All", "Faves" };
+static const char *FILTER_NAMES[FILTER_COUNT] = {
+  "Home", "Local", "Utah Co", "All", "Faves"
+};
 
 // Persistence keys
 #define PKEY_VERSION 1
@@ -53,7 +56,7 @@ typedef struct {
 // Ring buffer, newest first (index 0 = most recent / highest id).
 static CallEntry s_calls[MAX_CALLS];
 static int       s_count = 0;
-static int       s_filter = FILTER_LOCAL;
+static int       s_filter = FILTER_HOME;
 static char      s_status[32] = "Connecting...";
 
 static Window      *s_main_window;
@@ -130,7 +133,7 @@ static void load_state(void) {
   }
   if (persist_exists(PKEY_FILTER)) {
     s_filter = persist_read_int(PKEY_FILTER);
-    if (s_filter < 0 || s_filter >= FILTER_COUNT) s_filter = FILTER_LOCAL;
+    if (s_filter < 0 || s_filter >= FILTER_COUNT) s_filter = FILTER_HOME;
   }
   s_count = persist_read_int(PKEY_COUNT);
   if (s_count < 0) s_count = 0;
