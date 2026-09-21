@@ -23,8 +23,10 @@ reinstall (the phone caches the JS).
 - `src/pkjs/index.js` — phone bridge: poll, filter, Basic auth, AppMessage.
 - `src/pkjs/config.js` — Clay settings page.
 - `test/harness.js` — run the JS bridge without a watch:
-  `node test/harness.js local --offline` (canned payloads, no network) or
-  `node test/harness.js local` (routes to the internal CT137 container; needs LAN).
+  `node test/harness.js home --offline` (canned payloads, no network) or
+  `node test/harness.js home` (routes to the internal CT137 container; needs LAN).
+  Views: `home|ward|nbhd|nearby|live`; add `--open <incident_id>` to exercise
+  the drill-down.
 - `test/fixtures.json` — canned `/feed/api/*` payloads for `--offline`.
 - `test/stub/pebble.h` — stand-in SDK header so `main.c` can be type-checked here.
 
@@ -33,14 +35,27 @@ reinstall (the phone caches the JS).
 JS, and runs the bridge against the fixtures. Not a build; it just catches the
 cheap mistakes without a CloudPebble round trip.
 
+## Design
+Incident-grain first. The default views are the backend's own home-log scopes
+(`HOME_LOG_SCOPES` in `analytics/app/home_log.py`) widening outward from the
+home block; the live call tail is last in the cycle. Significance is applied on
+the phone — medium and up, except that a home-block incident always passes.
+Proximity gets the accent bar, severity only tints text, rows stay
+chronological. See "What counts as significant" in `README.md`.
+
 ## Backend coupling
 The feed schema has been renamed under this app once already (2026-06:
 `transcripts.zarchstuff.com/api/recent` -> `data.zarchstuff.com/feed/api/*`).
-`src/pkjs/index.js` therefore reads every call field through `pick()` with a
-list of candidate names rather than one hard-coded name. When the backend
-changes, add the new row shape to `test/fixtures.json`, run
-`node test/harness.js local --offline`, and extend the `pick()` lists — don't
+`src/pkjs/index.js` therefore reads every field through `pick()` with a list of
+candidate names rather than one hard-coded name. When the backend changes, add
+the new row shape to `test/fixtures.json`, run
+`node test/harness.js home --offline`, and extend the `pick()` lists — don't
 rewrite the mapping.
+
+Endpoints in use: `/reports/api/home-log` (incident views),
+`/feed/api/incident/<id>` (drill-down), `/feed/api/feed` + `/feed/api/since`
+(live tail). Screens are mocked at emery's real geometry at
+https://claude.ai/artifact/MVDBUJx3RPLYo28xGqsLak
 
 ## Gotchas
 Read the "Hard-won gotchas" section in `README.md` before touching settings,
