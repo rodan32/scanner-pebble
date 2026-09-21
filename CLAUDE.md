@@ -41,7 +41,11 @@ Incident-grain first. The default views are the backend's own home-log scopes
 home block; the live call tail is last in the cycle. Significance is applied on
 the phone — medium and up, except that a home-block incident always passes.
 Proximity gets the accent bar, severity only tints text, rows stay
-chronological. See "What counts as significant" in `README.md`.
+chronological. A row leads with the incident type, carries the address beneath
+it, and gives that line back to the summary when there is no address.
+Drill-down is list -> incident detail -> its calls -> one transcript; the detail
+exists because it is the only place the full summary fits. See "What counts as
+significant" in `README.md`.
 
 ## Backend coupling
 The feed schema has been renamed under this app once already (2026-06:

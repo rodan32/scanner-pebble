@@ -13,17 +13,19 @@
 //
 // The default view is INCIDENT-grain: the backend's home log, one row per
 // incident near home, ordered newest-first and colour-accented by how close to
-// home it happened. SELECT on an incident opens its member calls; SELECT on a
-// call opens the transcript. The call-grain live tail is the last view in the
+// home it happened. Drilling down goes list -> incident detail -> its calls ->
+// one call's transcript. The call-grain live tail is the last view in the
 // cycle — the interesting one, not the important one.
 //
 // Controls:
 //   List:   UP / DOWN        scroll
-//           SELECT (short)   open incident's calls, or a call's transcript
+//           SELECT (short)   open the detail for the highlighted row
 //           SELECT (long)    cycle view: Home -> Ward -> Nbhd -> Nearby -> Live
-//   Calls:  BACK             return to the incident list
 //   Detail: UP / DOWN        scroll; at the top/bottom, step to prev/next
+//           SELECT           (incident only) open the calls behind it
 //           BACK             return to the list
+//   Calls:  SELECT           open that call's transcript
+//           BACK             return to the incident detail
 // ---------------------------------------------------------------------------
 
 #define MAX_CALLS 24
@@ -65,7 +67,7 @@ static const char *VIEW_NAMES[VIEW_COUNT] = {
 #define PKEY_ENTRY_BASE 100
 // Bumped with every CallEntry layout change: persist_read_data would otherwise
 // reinterpret the old byte layout as the new struct and render garbage.
-#define PERSIST_VERSION 3
+#define PERSIST_VERSION 4
 
 typedef struct {
   int32_t id;         // stable row identity (call id, or incident event_key)
@@ -76,6 +78,7 @@ typedef struct {
   char    time[16];
   char    tag[28];
   char    cat[26];
+  char    loc[24];    // where, when it isn't already the lead; else empty
   char    text[160];
 } CallEntry;
 
@@ -97,7 +100,7 @@ static Window      *s_detail_window;
 static ScrollLayer *s_detail_scroll;
 static TextLayer   *s_detail_text;
 static TextLayer   *s_detail_header;
-static char         s_detail_buf[260];
+static char         s_detail_buf[320];
 static char         s_detail_head[80];
 static int          s_detail_index = -1;
 // The row a call sits at shifts every time a newer call arrives, so remember
@@ -354,14 +357,34 @@ static void menu_draw_row(GContext *gctx, const Layer *cell, MenuIndex *idx, voi
                      GRect(text_x + time_w, -2, b.size.w - text_x - time_w - 6, 20),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
 
-  // Bottom line: transcript snippet
+  // WHERE, on its own line under the type — but only when the phone sent one,
+  // which it does only when the address would not simply repeat the lead. A
+  // row never spends a line saying the same thing twice.
+  int body_y = incident ? 18 : 20;
+  int body_h = incident ? 46 : 24;
+  if (incident && e->loc[0]) {
+    GColor loc_color = selected ? GColorWhite : GColorBlack;
+#if defined(PBL_COLOR)
+    // Subordinate to the type above it: this is context, not the headline.
+    if (!selected) loc_color = GColorDarkGray;
+#endif
+    graphics_context_set_text_color(gctx, loc_color);
+    graphics_draw_text(gctx, e->loc,
+                       fonts_get_system_font(FONT_KEY_GOTHIC_14),
+                       GRect(text_x, 17, b.size.w - text_x - 6, 18),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    // The address takes its line out of the summary's two, so the summary
+    // falls back to one. Without an address it keeps both.
+    body_y = 34;
+    body_h = 30;
+  }
+
+  // Body: the summary. graphics_draw_text wraps to fill the rect and
+  // ellipsizes the last line that doesn't fit.
   graphics_context_set_text_color(gctx, selected ? GColorWhite : GColorBlack);
-  // Body: the summary. Two lines for an incident, one for a call. graphics_draw_text
-  // wraps to fill the rect and ellipsizes the last line that doesn't fit.
   graphics_draw_text(gctx, e->text,
                      fonts_get_system_font(FONT_KEY_GOTHIC_18),
-                     incident ? GRect(text_x, 18, b.size.w - text_x - 6, 46)
-                              : GRect(text_x, 20, b.size.w - text_x - 6, 24),
+                     GRect(text_x, body_y, b.size.w - text_x - 6, body_h),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
@@ -393,16 +416,15 @@ static void send_cmd(int cmd, int32_t inc_id) {
 
 static void push_members(int32_t inc_id);
 
-// SELECT always goes one level deeper: an incident opens its calls, a call
-// opens its transcript. An unclustered incident (inc == 0) has no call list to
-// open, so it behaves like a leaf and shows its text directly.
+// SELECT always goes one level deeper, and every level is one step:
+//
+//   incident list -> incident detail -> its calls -> a call's transcript
+//
+// The detail sits between the list and the calls because it is the only place
+// the full summary fits. Jumping the list straight to raw radio traffic skipped
+// the one screen that actually explains the incident.
 static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
   if (active_count() == 0) return;
-  CallEntry *e = &active_list()[idx->row];
-  if (!s_in_members && e->inc) {
-    push_members(e->inc);
-    return;
-  }
   push_detail(idx->row);
 }
 
@@ -544,10 +566,22 @@ static void detail_render(void) {
   }
   text_layer_set_text_color(s_detail_header, hc);
 
-  // Body: incident type / city (when present) + the transcript, kept neutral
-  // black for readability.
-  if (e->cat[0]) {
-    snprintf(s_detail_buf, sizeof(s_detail_buf), "%s\n\n%s", e->cat, e->text);
+  // Body. An INCIDENT detail is the screen that explains the incident, so it
+  // leads with what and where at full length — neither is truncated to a row
+  // here — then the summary, then the way down to the calls behind it. A CALL
+  // detail is just its transcript, which is already the whole story.
+  if (e->inc) {
+    snprintf(s_detail_buf, sizeof(s_detail_buf), "%s%s%s\n\n%s\n\n\xE2\x96\xBC calls",
+             e->cat,
+             e->loc[0] ? "\n" : "",
+             e->loc,
+             e->text);
+  } else if (e->cat[0]) {
+    snprintf(s_detail_buf, sizeof(s_detail_buf), "%s%s%s\n\n%s",
+             e->cat,
+             e->loc[0] ? "\n" : "",
+             e->loc,
+             e->text);
   } else {
     snprintf(s_detail_buf, sizeof(s_detail_buf), "%s", e->text);
   }
@@ -605,9 +639,18 @@ static void detail_down_click(ClickRecognizerRef rec, void *ctx) {
   }
 }
 
+// SELECT on an incident detail opens the calls behind it. A call's transcript
+// is the leaf — there is nothing below it, so SELECT does nothing there.
+static void detail_select_click(ClickRecognizerRef rec, void *ctx) {
+  if (s_detail_index < 0 || s_detail_index >= active_count()) return;
+  int32_t inc = active_list()[s_detail_index].inc;
+  if (inc) push_members(inc);
+}
+
 static void detail_click_provider(void *ctx) {
   window_single_click_subscribe(BUTTON_ID_UP, detail_up_click);
   window_single_click_subscribe(BUTTON_ID_DOWN, detail_down_click);
+  window_single_click_subscribe(BUTTON_ID_SELECT, detail_select_click);
   // BACK keeps its default (pop back to the list).
 }
 
@@ -703,6 +746,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   copy_tuple_str(iter, MESSAGE_KEY_CALL_TIME, e.time, sizeof(e.time));
   copy_tuple_str(iter, MESSAGE_KEY_CALL_TAG,  e.tag,  sizeof(e.tag));
   copy_tuple_str(iter, MESSAGE_KEY_CALL_CAT,  e.cat,  sizeof(e.cat));
+  copy_tuple_str(iter, MESSAGE_KEY_CALL_LOC,  e.loc,  sizeof(e.loc));
   copy_tuple_str(iter, MESSAGE_KEY_CALL_TEXT, e.text, sizeof(e.text));
 
   if (e.id == 0) return;

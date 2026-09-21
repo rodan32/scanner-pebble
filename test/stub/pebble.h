@@ -38,6 +38,7 @@ typedef enum { GTextAlignmentLeft, GTextAlignmentCenter, GTextAlignmentRight } G
 typedef enum { MenuRowAlignTop, MenuRowAlignCenter } MenuRowAlign;
 typedef void *GTextAttributes;
 
+#define FONT_KEY_GOTHIC_14 "14"
 #define FONT_KEY_GOTHIC_18 "18"
 #define FONT_KEY_GOTHIC_18_BOLD "18b"
 #define FONT_KEY_GOTHIC_24_BOLD "24b"
@@ -65,6 +66,8 @@ void window_set_click_config_provider(Window *, void (*)(void *));
 void window_single_click_subscribe(int, void (*)(ClickRecognizerRef, void *));
 #define BUTTON_ID_UP 1
 #define BUTTON_ID_DOWN 2
+#define BUTTON_ID_SELECT 3
+#define BUTTON_ID_BACK 0
 
 GRect layer_get_bounds(const Layer *);
 GRect layer_get_frame(const Layer *);
@@ -141,3 +144,4 @@ void app_event_loop(void);
 #define MESSAGE_KEY_CALL_TIER 11
 #define MESSAGE_KEY_CALL_ORD 12
 #define MESSAGE_KEY_CALL_INC 13
+#define MESSAGE_KEY_CALL_LOC 14

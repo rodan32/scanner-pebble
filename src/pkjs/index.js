@@ -290,6 +290,7 @@ function sendCall(call) {
     CALL_TEXT: String(text).slice(0, 156),
     CALL_EMERG: emergency,
     CALL_TIER: tierRank(call),
+    CALL_LOC: '',
     // Live-call ids are monotonic, so the id doubles as the sort key.
     CALL_ORD: Number(call.id) || 0,
     CALL_INC: 0   // a call row is already the leaf; nothing to drill into
@@ -329,11 +330,16 @@ function sendIncident(inc) {
   // Secondary line: what happened, else where. Append the member-call count
   // when an incident is more than a single call — "3 calls" is a useful signal
   // that something is still developing.
-  // The row's lead line answers "what happened". incident_type is the real
-  // answer, but the backend leaves it NULL on plenty of rows — fall back to
-  // WHERE rather than to nothing, since an address near home is itself most of
-  // the answer. The summary underneath carries the detail either way.
-  var cat = pick(inc, ['incident_type', 'address', 'city']);
+  // Two lines of identity: WHAT on the lead, WHERE under it.
+  //
+  // incident_type is the real "what", but the backend leaves it NULL on plenty
+  // of rows — then the address leads instead, since near home the where IS most
+  // of the answer. `loc` is sent only when it would not simply repeat the lead,
+  // so a row never spends a line saying the same thing twice; the watch gives
+  // the summary that line back when `loc` is empty.
+  var where = pick(inc, ['address', 'city']);
+  var cat = pick(inc, ['incident_type']) || where;
+  var loc = (where && where !== cat) ? where : '';
   // The member count rides the lead line, since that is what the list draws for
   // an incident — "5 calls" is how you tell a finished incident from one still
   // developing. But the TYPE is the thing the user came for, so the count is
@@ -361,6 +367,7 @@ function sendIncident(inc) {
     CALL_TIME: clockOf(pick(inc, ['start_time', 'when']), true),
     CALL_TAG: tag.slice(0, 26),
     CALL_CAT: String(cat).slice(0, 24),
+    CALL_LOC: String(loc).slice(0, 22),
     CALL_TEXT: String(text).slice(0, 156),
     CALL_EMERG: emergency,
     CALL_TIER: incidentTier(inc),

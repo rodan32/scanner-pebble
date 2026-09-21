@@ -134,9 +134,14 @@ function renderRow(msg) {
   const em = msg.CALL_EMERG ? '!' : ' ';
   const head = msg.CALL_TIME + em;
   const pad = Math.max(1, ROW_COLS + 4 - head.length - String(lead).length);
-  const body = wrap(msg.CALL_TEXT, ROW_COLS, incident ? 2 : 1)
-                 .map((l) => `  ${bar} ${l}`).join('\n');
-  return `  ${bar} ${head}${' '.repeat(pad)}${lead}\n${body}`;
+  // WHERE takes its line out of the summary's two, exactly as main.c does.
+  const hasLoc = incident && msg.CALL_LOC;
+  const lines = [];
+  if (hasLoc) lines.push(`  ${bar} ${msg.CALL_LOC}`);
+  for (const l of wrap(msg.CALL_TEXT, ROW_COLS, (incident && !hasLoc) ? 2 : 1)) {
+    lines.push(`  ${bar} ${l}`);
+  }
+  return `  ${bar} ${head}${' '.repeat(pad)}${lead}\n${lines.join('\n')}`;
 }
 
 // --- mock: Pebble -----------------------------------------------------------

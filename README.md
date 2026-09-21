@@ -26,23 +26,30 @@ outward; the fifth is the call-grain live tail.
 | Context   | Button         | Action                                          |
 |-----------|----------------|-------------------------------------------------|
 | List      | UP / DOWN      | scroll                                          |
-| List      | SELECT (short) | open an incident's calls, or a call's transcript|
+| List      | SELECT (short) | open the detail for the highlighted row         |
 | List      | SELECT (long)  | cycle the view                                  |
-| Calls     | BACK           | return to the incident list                     |
 | Detail    | UP / DOWN      | scroll; at the top/bottom, step prev/next       |
+| Detail    | SELECT         | *(incident only)* open the calls behind it      |
 | Detail    | BACK           | return to the list                              |
+| Calls     | SELECT         | open that call's transcript                     |
+| Calls     | BACK           | return to the incident detail                   |
 
-SELECT always goes one level deeper:
+SELECT always goes one level deeper, and every level is one step:
 
 ```
-incident list  ──SELECT──▶  member calls  ──SELECT──▶  transcript
-     ◀────BACK──────────────────   ◀────BACK──────────────
+incident list ─SELECT▶ incident detail ─SELECT▶ its calls ─SELECT▶ transcript
+              ◀─BACK──                 ◀─BACK──            ◀─BACK──
 ```
 
-An unclustered incident (no `incident_id`) has no call list, so it opens its
-text directly. While you are drilled into an incident the phone stops polling —
-the member list is a fixed set, and pushing fresh feed rows in underneath would
-only be confusing.
+The **incident detail** sits between the list and the calls because it is the
+only place the full summary fits — a row gives it one or two clipped lines.
+Jumping the list straight to raw radio traffic skipped the one screen that
+actually explains the incident.
+
+An unclustered incident (no `incident_id`) has no calls behind it, so SELECT on
+its detail does nothing; a transcript is a leaf for the same reason. While you
+are inside an incident's calls the phone stops polling — the member list is a
+fixed set, and pushing fresh feed rows in underneath would only be confusing.
 
 ## What counts as significant
 
@@ -62,10 +69,24 @@ less than what happened — so the agency moves to the detail view and keeps onl
 its colour here. `incident_type` is NULL on plenty of rows, so the lead falls
 back to the address, then the city: near home, *where* is most of the answer.
 
-Incident rows are 66px rather than 46px, giving the summary **two lines**. One
-line is about thirty characters, which truncates mid-clause and leaves a list of
-bare timestamps. The extra height costs one visible row and is the difference
-between a feed you can read and one you have to open.
+Under it sits the **where**, in a smaller, dimmer font. The row adapts rather
+than growing: the phone sends a location only when it would not simply repeat
+the lead, and when there is none the summary takes that line back.
+
+```
+17:40           suspicious vehicle      type leads, count if it fits
+640 N 700 E                             where, when it isn't the lead
+Reports of an unfamiliar…               summary gets one line
+
+17:13                640 N 700 E·2      no type — the address leads
+Caller reports a garage door            …so the summary keeps both
+left open overnight on the…
+```
+
+Incident rows are 66px rather than 46px. At 46px the summary gets one line —
+about thirty characters — which truncates mid-clause and leaves a list of bare
+timestamps. The extra height costs one visible row and is the difference between
+a feed you can read and one you have to open.
 
 The clock drops to `HH:MM` on incidents — seconds are noise on something that
 spanned minutes, and the space goes to the type. The member count (`·3`) is
@@ -184,6 +205,7 @@ This repo is the source of truth; CloudPebble is the build/flash backend
 | `CALL_TIME`  | JS→watch  | `HH:MM:SS` on calls, `HH:MM` on incidents     |
 | `CALL_TAG`   | JS→watch  | talkgroup / agency (lead on call rows)        |
 | `CALL_CAT`   | JS→watch  | incident type / address, `·N` (lead on incidents) |
+| `CALL_LOC`   | JS→watch  | where, only when it isn't already the lead    |
 | `CALL_TEXT`  | JS→watch  | summary or transcript (~156 chars)            |
 | `CALL_EMERG` | JS→watch  | 1 if severity is high/critical                |
 | `STATUS`     | JS→watch  | connection/status text                        |

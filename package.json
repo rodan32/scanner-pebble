@@ -1,7 +1,7 @@
 {
   "name": "scanner-pebble",
   "author": "rodan32",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "keywords": [
     "pebble-app"
@@ -37,6 +37,7 @@
       "CALL_TIER",
       "CALL_ORD",
       "CALL_INC",
+      "CALL_LOC",
       "STATUS",
       "FILTER",
       "CMD",
