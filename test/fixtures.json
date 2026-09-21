@@ -1,5 +1,5 @@
 {
-  "_comment": "Canned /feed/api/* payloads for `node test/harness.js --offline`. The rows deliberately mix field shapes: `feed` carries the schema the bridge was written against, `since` carries the renamed/incident-shaped variants (transcript_clean, transcript_snippet, epoch start_time) that src/pkjs/index.js reads through its `pick` candidate lists. Both must render a complete row on the watch.",
+  "_comment": "Canned payloads for `node test/harness.js --offline`. `home_log` is /reports/api/home-log (the default incident view), `incident` is /feed/api/incident/<id> (drill-down), `feed`/`since` are the live call tail. Rows deliberately mix field shapes so src/pkjs/index.js's pick() candidate lists stay exercised: a backend rename should degrade to one blank sub-field, never a blank feed.",
   "feed": {
     "next_cursor": 0,
     "calls": [
@@ -37,6 +37,92 @@
         "tg": "UtCo Sher 3",
         "incident_type": "welfare check",
         "transcript_snippet": "Checking the welfare of an occupant at the listed address."
+      }
+    ]
+  },
+  "home_log": {
+    "scope": "nearby",
+    "has_more": false,
+    "next_cursor": null,
+    "unavailable": false,
+    "incidents": [
+      {
+        "event_key": 90210,
+        "incident_id": 4471,
+        "start_time": 1790012400,
+        "when": "Sep 21, 2026 2:20 PM",
+        "tiers": [
+          "home_block"
+        ],
+        "tier_labels": [
+          "Home block"
+        ],
+        "incident_type": "suspicious vehicle",
+        "severity": "low",
+        "address": "640 N 700 E",
+        "city": "Orem",
+        "agency": "OrmLndn PD 1",
+        "local_call_count": 3,
+        "summary": "Reports of an unfamiliar vehicle idling on the block; officer checking the plate.",
+        "representative_excerpt": "I'll be out with a silver sedan, 640 North."
+      },
+      {
+        "event_key": 90209,
+        "incident_id": 4470,
+        "start_time": 1790009000,
+        "tiers": [
+          "neighborhood_grid"
+        ],
+        "incident_type": "traffic accident",
+        "severity": "high",
+        "city": "Orem",
+        "agency": "UtCo Fire/EMS",
+        "local_call_count": 5,
+        "summary": "Two-vehicle collision at State and Center, one party complaining of neck pain."
+      },
+      {
+        "event_key": 90208,
+        "incident_id": null,
+        "start_time": 1790005000,
+        "tiers": [
+          "near_home_area"
+        ],
+        "incident_type": "parking complaint",
+        "severity": "low",
+        "city": "Orem",
+        "agency": "Orem PD 3",
+        "local_call_count": 1,
+        "representative_excerpt": "Vehicle blocking the alley behind the strip mall."
+      }
+    ]
+  },
+  "incident": {
+    "incident_id": 4471,
+    "calls": [
+      {
+        "id": 5510221,
+        "start_time": 1790012400,
+        "time_local": "2026-09-21T14:20:00",
+        "tg_alpha_tag": "OrmLndn PD 1",
+        "severity": "low",
+        "incident_type": "suspicious vehicle",
+        "transcript": "Dispatch, I'll be out with a silver sedan at 640 North 700 East."
+      },
+      {
+        "id": 5510238,
+        "start_time": 1790012520,
+        "time_local": "2026-09-21T14:22:00",
+        "tg_alpha_tag": "OrmLndn PD 1",
+        "severity": "low",
+        "transcript_clean": "Plate comes back clear, registered owner lives on the street."
+      },
+      {
+        "id": 5510255,
+        "start_time": 1790012700,
+        "time_local": "2026-09-21T14:25:00",
+        "tg_alpha_tag": "OrmLndn PD 1",
+        "severity": "low",
+        "transcript": "Contact made, owner was waiting on a ride. Clearing, no further."
       }
     ]
   }

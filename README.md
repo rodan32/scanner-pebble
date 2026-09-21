@@ -1,64 +1,98 @@
 # Scanner Feed — Pebble Time 2 watchapp
 
-A live-ish P25 scanner feed for the Pebble Time 2 (`emery`). The phone polls
-the scanner backend (`data.zarchstuff.com/feed/api/*`), filters by a preset,
-and pushes calls to the watch, which keeps a small persistent cache so it opens
-instantly with the last-known feed.
+An **incident-first** scanner companion for the Pebble Time 2 (`emery`). The
+phone polls the scanner backend, and the watch shows one row per incident near
+home — not a running call feed. The raw call tail is still there, one long-press
+away, because it is the interesting view rather than the important one.
 
 Companion to the PicoCalc Scanner Terminal — same backend, Pebble-native UI.
 
+## Views
+
+Long-press SELECT cycles five views. The first four are the backend's own home
+geography scopes (`HOME_LOG_SCOPES` in `analytics/app/home_log.py`), widening
+outward; the fifth is the call-grain live tail.
+
+| View       | Grain    | Shows                                          |
+|------------|----------|------------------------------------------------|
+| **Home**   | incident | your home block only                           |
+| **Ward**   | incident | + ward households                              |
+| **Nbhd**   | incident | + the neighborhood grid                        |
+| **Nearby** | incident | + roughly a mile out                           |
+| **Live**   | call     | raw call tail for `HOME_AREAS` (default `Orem`)|
+
 ## Controls
 
-| Context | Button         | Action                                            |
-|---------|----------------|---------------------------------------------------|
-| List    | UP / DOWN      | scroll the feed                                   |
-| List    | SELECT (short) | open the full transcript for the call             |
-| List    | SELECT (long)  | cycle: **Home → Local → Utah Co → All → Faves**   |
-| Detail  | UP / DOWN      | scroll; at the top/bottom, step to prev/next call |
-| Detail  | BACK           | return to the list                                |
+| Context   | Button         | Action                                          |
+|-----------|----------------|-------------------------------------------------|
+| List      | UP / DOWN      | scroll                                          |
+| List      | SELECT (short) | open an incident's calls, or a call's transcript|
+| List      | SELECT (long)  | cycle the view                                  |
+| Calls     | BACK           | return to the incident list                     |
+| Detail    | UP / DOWN      | scroll; at the top/bottom, step prev/next       |
+| Detail    | BACK           | return to the list                              |
 
-The top bar shows the active filter and connection status (`live`, `offline`,
-`auth failed`, etc.). The **talkgroup is color-coded by agency type** (police /
-sheriff / fire / EMS / highway patrol) on color watches — both in the list and
-on the detail header — with emergencies shown in red; B&W watches fall back to
-black text.
+SELECT always goes one level deeper:
 
-## Filters
+```
+incident list  ──SELECT──▶  member calls  ──SELECT──▶  transcript
+     ◀────BACK──────────────────   ◀────BACK──────────────
+```
 
-Filtering is by **area** — the backend resolves each area chip to `tg_alpha_tag`
-substrings (`analytics/app/areas.py`). The presets map to area lists in
-`src/pkjs/index.js`:
+An unclustered incident (no `incident_id`) has no call list, so it opens its
+text directly. While you are drilled into an incident the phone stops polling —
+the member list is a fixed set, and pushing fresh feed rows in underneath would
+only be confusing.
 
-- **Home** — *the default.* Strictly the home city (`HOME_AREAS`, default
-  `Orem`). This mirrors the backend's own `MY_AREA_DEFAULT`; the `Orem` chip
-  already resolves to Orem/Lindon PD plus Orem Fire and the shared POL Fire
-  dispatch, so one chip really is police + fire for home. Unlike Faves, an
-  empty setting falls back to the built-in home area rather than widening to
-  All — the default preset must never quietly become "everything".
-- **Local** — busiest nearby agencies: Orem, Lehi, American Fork, UtCo Sheriff,
-  UtCo Fire/EMS. (Orem/Lindon PD is by far the highest-volume TG, so this
-  preset always has a steady feed.)
-- **Utah Co** — every Utah-County-area chip.
-- **All** — unfiltered (statewide: UHP, DPS, SLCo, etc.).
-- **Faves** — your own area list from settings (`FAVE_AREAS`, comma-separated
-  area names). Empty falls back to All.
+## What counts as significant
+
+`/reports/api/home-log` has no severity parameter, so the floor is applied on
+the phone:
+
+- **medium and up**, *except*
+- **a home-block incident always passes, at any severity.**
+
+A minor call on your own block is exactly what this view exists to surface;
+severity is the backend's read of the radio traffic, not of how much it matters
+to you.
+
+The list row only has room for time, agency and one ellipsized line of summary,
+so `CALL_CAT` never reaches it — the member count rides the agency tag instead
+(`OrmLndn PD 1 ·3`), because "5 calls" is how you tell a finished incident from
+one still developing.
+
+Rows stay in **chronological** order. Proximity gets its own visual channel
+instead of a competing sort: a 4px accent bar in the left margin — red for home
+block, orange ward, yellow neighborhood, blue nearby — with severity only
+tinting the text, and a home-block incident spelling it out in the detail
+header so B&W watches get it too.
+
+**Tiers are only trusted once enriched.** The backend's pre-Whisper scorer
+fires `home_block` on cross-city grid collisions before `calls.city` is
+populated, and the enricher retracts it ~30s later (`B-2026-05-12-1`,
+`B-2026-05-15-1`). The bridge treats an unenriched row as untiered rather than
+badging a call as "home block" on data the backend itself withdraws.
 
 **Muting:** `MUTE_TAGS` (settings) is a comma-separated list of substrings; any
-call whose talkgroup tag contains one is dropped on the phone before it reaches
-the watch — a cheap way to silence a chatty channel. Both list fields show blank
-when the settings page opens: leaving one blank keeps the current value, and
-typing `none` clears it.
+call whose talkgroup contains one is dropped on the phone before it reaches the
+watch. Blank keeps the current value; type `none` to clear.
 
 ## Architecture
 
-- `src/c/main.c` — watchapp: feed list (MenuLayer), detail view (ScrollLayer),
-  filter cycling, persistent ring buffer (`MAX_CALLS = 24`).
-- `src/pkjs/index.js` — PebbleKit JS: seeds history from `/feed/api/feed`, then
-  live-tails `/feed/api/since?after_id=` every 10s, sending one AppMessage per
-  call. Basic-auth creds come from settings.
-- `src/pkjs/config.js` — Clay settings page (host / user / password / default
-  filter / home areas / favorite areas / muted talkgroups). Nothing sensitive is
-  committed.
+- `src/c/main.c` — watchapp: feed list (MenuLayer), member-call list (a second
+  window, so BACK pops natively), detail view (ScrollLayer), view cycling,
+  persistent ring buffer (`MAX_CALLS = 24`, `MAX_MEMBERS = 12`).
+- `src/pkjs/index.js` — PebbleKit JS. Polls `/reports/api/home-log` every 60s
+  for the incident views, or seeds `/feed/api/feed` and live-tails
+  `/feed/api/since` every 10s for the Live view, and fetches
+  `/feed/api/incident/<id>` on drill-down. One AppMessage per row.
+- `src/pkjs/config.js` — Clay settings page (host / user / password / opening
+  view / home areas / muted talkgroups). Nothing sensitive is committed.
+
+The home log aggregates member calls per incident and is far heavier than the
+live tail's indexed lookup by id, which is why the two poll at different rates —
+a 10s poll on it would hammer the backend's two sync gunicorn workers for data
+that changes on the order of minutes.
 
 The watch can't reach the LAN directly — all network access is through the
 phone (PebbleKit JS). The backend is public over HTTPS (Cloudflare + NPM basic
@@ -66,112 +100,10 @@ auth), so the phone bridge works on any network.
 
 > **Host gotcha (2026-06):** the feed moved from the old scanner-feed app
 > (`transcripts.zarchstuff.com/api/recent`) into the analytics app at
-> `data.zarchstuff.com/feed/api/*`. The old host now **302-redirects** to the
-> new one — and XHR **strips the `Authorization` header on a cross-origin
-> redirect**, so pointing the watch at `transcripts…` fails basic auth
-> (`auth failed`) and returns HTML (`bad data`). Always use `data.zarchstuff.com`
-> directly. The new `/feed/api/*` responses are wrapped objects
-> (`{calls:[…], max_id}`), not bare arrays.
-
-## Hard-won gotchas (read before reusing this as a template)
-
-Every one of these cost real debugging time on this app. If you're starting a
-new Pebble + Clay + CloudPebble project, read these first.
-
-### 1. `clay.getSettings()` defaults to `convert=true` — read with `false`
-
-This was the big one: **settings entered in the config page silently saved as
-empty.** `clay.getSettings(e.response)` defaults to `convert: true`, which
-returns the settings keyed by **numeric message-key IDs** (the shape
-`Pebble.sendAppMessage()` wants). Reading them by *name* — `settings.USERNAME` —
-is then always `undefined`, so you persist blank values and never notice.
-
-```js
-// WRONG — keys are numeric ids; settings.USERNAME is undefined
-var settings = clay.getSettings(e.response);
-var user = settings.USERNAME;
-
-// RIGHT — keys are the string messageKey; value is under `.value`
-var settings = clay.getSettings(e.response, false);
-var user = settings.USERNAME && settings.USERNAME.value;
-```
-
-Only do this if you read settings by name on the JS side (as we do, persisting
-to our own `localStorage`). If you just forward the dict straight to
-`sendAppMessage`, the default `convert: true` is correct.
-
-### 2. With `autoHandleEvents: false`, you own persistence — and the form opens blank
-
-We pass `autoHandleEvents: false` so we can store config under our own key. The
-trade-off: Clay does **not** repopulate the form from your storage, so it opens
-blank every time. Treat an empty field on save as **"unchanged," not "clear"** —
-fall back to the saved value — or a settings tweak (e.g. just changing a filter)
-will silently wipe creds. See `webviewclosed` in `src/pkjs/index.js`.
-
-### 3. HTTP Basic auth must be UTF-8, then base64 (RFC 7617)
-
-PebbleKit JS has no reliable `btoa`/`TextEncoder`. A hand-rolled base64 that
-does `charCodeAt(i) & 0xff` is correct **only for ASCII** — any non-ASCII char
-in a username/password (accent, `£`, dash, emoji) gets truncated and the server
-401s on correct creds. UTF-8-encode the `user:pass` string first, then base64.
-See `toUtf8` / `authHeader` in `src/pkjs/index.js`.
-
-### 4. XHR strips `Authorization` across a cross-origin redirect
-
-If your endpoint 301/302s to a different host, the browser/XHR drops the
-`Authorization` header on the redirected request and you get a 401 that looks
-like bad creds. Target the final host directly; don't rely on a redirect.
-
-### 5. CloudPebble's GitHub sync is manual, one-branch, and doesn't build
-
-The slowest part of this whole saga was the build pipeline, not the code:
-
-- **Pull ≠ build ≠ install.** They're three separate actions. A GitHub pull
-  only updates source in CloudPebble; you still have to **Run build** and then
-  **Install** to the phone.
-- **Sync is manual and per-branch.** CloudPebble pulls one configured branch
-  (usually `master`) only when you click *Pull from GitHub* — it does not
-  auto-sync on push. Develop on a branch but get it onto the branch CloudPebble
-  tracks.
-- **Bump the version** (`package.json` → `version`) so you can *confirm on the
-  watch* that the new build actually landed (check the app's About screen).
-  Half this app's "fixes didn't work" turns were just stale builds.
-- **PebbleKit JS is cached by the phone app.** If new JS doesn't take, **delete
-  the app from the watch and reinstall**, and force-quit/reopen the Pebble phone
-  app to clear the bridge cache.
-- If a pull "succeeds" but the editor still shows old code, **delete the
-  CloudPebble project and re-import fresh** rather than fighting a stuck sync.
-
-### 6. Make failure states legible on the watch
-
-The watch's only debug channel is the status line, so make it carry signal:
-distinguish `set creds` (no credential stored) from `auth failed` (server
-rejected) from `offline`/`timeout`, and tag the host (`@data`) so a stuck watch
-tells you where it was pointed. When stuck, a temporary status that reports
-*lengths* of stored values (never the values themselves) is a safe way to see
-what's actually in storage.
-
-### 7. The launch-time AppMessage handshake is a race, and it fails silently
-
-The watch sends its persisted filter to the phone in `init()`. If PebbleKit JS
-hasn't booted yet that send just fails — and JS then falls back to
-`DEFAULT_FILTER` from settings, so the watch's status bar says **Faves** while
-the phone is fetching **Local**. Nothing errors; the feed is simply the wrong
-one.
-
-Two things fix it, and you want both: register an
-`app_message_register_outbox_failed` handler (otherwise a failed send leaves the
-status stuck on `switching...`, which reads as a hung app), and re-send the
-filter on the *first inbound message*, which is the only reliable proof the
-phone is listening. See `s_filter_synced` in `src/c/main.c`.
-
-### 8. Read feed fields through a candidate list, not a fixed name
-
-This app's backend renamed its feed schema out from under it once already
-(gotcha above). Reading `call.transcript` directly means a rename shows up as a
-watch full of blank rows. Reading
-`pick(call, ['transcript_clean', 'transcript', …])` means it shows up as one
-missing sub-field, and the app keeps working while you catch up.
+> `data.zarchstuff.com`. The old host now **302-redirects** to the new one —
+> and XHR **strips the `Authorization` header on a cross-origin redirect**, so
+> pointing the watch at `transcripts…` fails basic auth (`auth failed`) and
+> returns HTML (`bad data`). Always use `data.zarchstuff.com` directly.
 
 ## Pre-flight checks (no SDK, no watch, no network)
 
@@ -230,17 +162,26 @@ This repo is the source of truth; CloudPebble is the build/flash backend
 
 ## Protocol (AppMessage keys)
 
-| Key          | Dir       | Meaning                                  |
-|--------------|-----------|------------------------------------------|
-| `MSG_TYPE`   | JS→watch  | 0 = call, 1 = status                     |
-| `CALL_ID`    | JS→watch  | DB id (dedupe / ordering key)            |
-| `CALL_TIME`  | JS→watch  | local time string                        |
-| `CALL_TAG`   | JS→watch  | talkgroup alpha tag (`tg_alpha_tag`)     |
-| `CALL_CAT`   | JS→watch  | incident type / city (often empty)       |
-| `CALL_TEXT`  | JS→watch  | transcript (truncated ~156 chars)        |
-| `CALL_EMERG` | JS→watch  | 1 if severity is high/critical           |
-| `STATUS`     | JS→watch  | connection/status text                   |
-| `FILTER`     | watch→JS  | 0 = Home, 1 = Local, 2 = Utah Co, 3 = All, 4 = Faves |
+| Key          | Dir       | Meaning                                       |
+|--------------|-----------|-----------------------------------------------|
+| `MSG_TYPE`   | JS→watch  | 0 = row, 1 = status                           |
+| `CALL_ID`    | JS→watch  | row identity: call id, or incident `event_key`|
+| `CALL_ORD`   | JS→watch  | sort key, descending: call id or `start_time` |
+| `CALL_INC`   | JS→watch  | incident id to drill into; 0 = leaf row       |
+| `CALL_TIER`  | JS→watch  | relevance tier 0-4 (4 = home block)           |
+| `CALL_TIME`  | JS→watch  | `HH:MM:SS`                                    |
+| `CALL_TAG`   | JS→watch  | talkgroup / agency, plus `·N` member count    |
+| `CALL_CAT`   | JS→watch  | incident type or city (detail view only)      |
+| `CALL_TEXT`  | JS→watch  | summary or transcript (~156 chars)            |
+| `CALL_EMERG` | JS→watch  | 1 if severity is high/critical                |
+| `STATUS`     | JS→watch  | connection/status text                        |
+| `FILTER`     | watch→JS  | view 0-4 (Home…Live)                          |
+| `CMD`        | watch→JS  | 1 = open incident (with `CALL_INC`), 2 = back |
+
+`CALL_ORD` exists because the home log's `event_key` is not guaranteed to run
+in time order — the watch sorts on `ord` and uses the id purely as identity, so
+re-sending a row (late enrichment landing a summary or severity minutes after
+the call) updates it in place instead of duplicating it.
 
 ## Roadmap
 

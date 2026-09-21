@@ -31,14 +31,14 @@ module.exports = [
       {
         type: 'select',
         messageKey: 'DEFAULT_FILTER',
-        label: 'Default filter',
+        label: 'Opening view',
         defaultValue: '0',
         options: [
-          { label: 'Home', value: '0' },
-          { label: 'Local', value: '1' },
-          { label: 'Utah Co', value: '2' },
-          { label: 'All', value: '3' },
-          { label: 'Faves', value: '4' }
+          { label: 'Home block', value: '0' },
+          { label: 'Ward', value: '1' },
+          { label: 'Neighborhood', value: '2' },
+          { label: 'Nearby (~1 mi)', value: '3' },
+          { label: 'Live calls', value: '4' }
         ]
       },
       {
@@ -49,17 +49,11 @@ module.exports = [
       },
       {
         type: 'input',
-        messageKey: 'FAVE_AREAS',
-        label: 'Favorite areas',
-        attributes: { placeholder: 'Orem, Provo, UHP' }
-      },
-      {
-        type: 'input',
         messageKey: 'MUTE_TAGS',
         label: 'Mute talkgroups',
         attributes: { placeholder: 'Orem PD, Dispatch' }
       },
-      { type: 'text', defaultValue: 'Home areas: the strict home-area list behind the default "Home" preset — keep it narrow (default: Orem). Favorite areas: comma-separated agency/area names for the "Faves" preset (same names as the built-in presets, e.g. Orem, Provo, UHP). Mute talkgroups: comma-separated text — any call whose talkgroup contains one of these is hidden. All three fields show blank on open; leaving one blank keeps the current value, and typing "none" clears it (Home falls back to Orem).' }
+      { type: 'text', defaultValue: 'The first four views are incident-level, widening outward from your home block; "Live calls" is the raw call feed. Long-press SELECT on the watch cycles them. Home areas: the agency/area list scoping the live call feed — keep it narrow (default: Orem). Mute talkgroups: comma-separated text; any call whose talkgroup contains one of these is hidden. Both fields show blank on open; leaving one blank keeps the current value, and typing "none" clears it (Home areas falls back to Orem).' }
     ]
   },
   { type: 'submit', defaultValue: 'Save' }

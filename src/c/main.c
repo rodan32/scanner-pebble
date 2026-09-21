@@ -11,52 +11,82 @@
 // the app opens instantly with the last-known feed even before the phone
 // reconnects.
 //
+// The default view is INCIDENT-grain: the backend's home log, one row per
+// incident near home, ordered newest-first and colour-accented by how close to
+// home it happened. SELECT on an incident opens its member calls; SELECT on a
+// call opens the transcript. The call-grain live tail is the last view in the
+// cycle — the interesting one, not the important one.
+//
 // Controls:
-//   List:   UP / DOWN        scroll the feed
-//           SELECT (short)   open the full transcript for the highlighted call
-//           SELECT (long)    cycle filter: Home -> Local -> Utah Co -> All -> Faves
-//   Detail: UP / DOWN        scroll; at the top/bottom, step to prev/next call
+//   List:   UP / DOWN        scroll
+//           SELECT (short)   open incident's calls, or a call's transcript
+//           SELECT (long)    cycle view: Home -> Ward -> Nbhd -> Nearby -> Live
+//   Calls:  BACK             return to the incident list
+//   Detail: UP / DOWN        scroll; at the top/bottom, step to prev/next
 //           BACK             return to the list
 // ---------------------------------------------------------------------------
 
 #define MAX_CALLS 24
+// Member calls of one incident. Smaller than the feed buffer deliberately: this
+// is a second full CallEntry array and app RAM is the scarce resource here.
+#define MAX_MEMBERS 12
 
 // MSG_TYPE values (JS -> watch)
 #define MSG_CALL   0
 #define MSG_STATUS 1
 
-// Filter presets (watch -> JS via MESSAGE_KEY_FILTER)
-#define FILTER_HOME  0   // strict home area — the default
-#define FILTER_LOCAL 1
-#define FILTER_UTCO  2
-#define FILTER_ALL   3
-#define FILTER_FAV   4
-#define FILTER_COUNT 5
+// Views (watch -> JS via MESSAGE_KEY_FILTER). 0-3 are incident-grain home-log
+// scopes widening outward from the home block; 4 is the live call tail.
+#define VIEW_HOME   0
+#define VIEW_WARD   1
+#define VIEW_NBHD   2
+#define VIEW_NEARBY 3
+#define VIEW_LIVE   4
+#define VIEW_COUNT  5
 
-static const char *FILTER_NAMES[FILTER_COUNT] = {
-  "Home", "Local", "Utah Co", "All", "Faves"
+static const char *VIEW_NAMES[VIEW_COUNT] = {
+  "Home", "Ward", "Nbhd", "Nearby", "Live"
 };
+
+// Commands (watch -> JS via MESSAGE_KEY_CMD)
+#define CMD_OPEN_INCIDENT  1
+#define CMD_CLOSE_INCIDENT 2
+
+// Relevance tiers (JS -> watch via MESSAGE_KEY_CALL_TIER), highest first.
+#define TIER_HOME_BLOCK 4
+#define TIER_WARD       3
+#define TIER_GRID       2
+#define TIER_BROADER    1
 
 // Persistence keys
 #define PKEY_VERSION 1
 #define PKEY_COUNT   2
 #define PKEY_FILTER  3
 #define PKEY_ENTRY_BASE 100
-#define PERSIST_VERSION 1
+// Bumped with every CallEntry layout change: persist_read_data would otherwise
+// reinterpret the old byte layout as the new struct and render garbage.
+#define PERSIST_VERSION 3
 
 typedef struct {
-  int32_t id;
+  int32_t id;         // stable row identity (call id, or incident event_key)
+  int32_t ord;        // sort key, descending — call id, or incident start_time
+  int32_t inc;        // incident id to drill into; 0 when the row is a leaf
   uint8_t emergency;
+  uint8_t tier;       // relevance tier, TIER_* above; 0 = external/unscored
   char    time[16];
   char    tag[28];
-  char    cat[20];
+  char    cat[26];
   char    text[160];
 } CallEntry;
 
-// Ring buffer, newest first (index 0 = most recent / highest id).
+// Feed buffer, newest first (index 0 = most recent).
 static CallEntry s_calls[MAX_CALLS];
 static int       s_count = 0;
-static int       s_filter = FILTER_HOME;
+// Member calls of the incident currently open, if any.
+static CallEntry s_members[MAX_MEMBERS];
+static int       s_member_count = 0;
+static bool      s_in_members = false;
+static int       s_filter = VIEW_HOME;
 static char      s_status[32] = "Connecting...";
 
 static Window      *s_main_window;
@@ -100,6 +130,19 @@ static TgType tg_type(const char *tag) {
   return TG_OTHER;
 }
 
+// Accent bar colour for the relevance tier — how close to home it happened.
+// Drawn as a bar in the left margin rather than as text colour so it reads at a
+// glance without competing with the emergency red on the tag.
+static GColor tier_color(uint8_t tier) {
+  switch (tier) {
+    case TIER_HOME_BLOCK: return GColorRed;
+    case TIER_WARD:       return GColorOrange;
+    case TIER_GRID:       return GColorYellow;
+    case TIER_BROADER:    return GColorCobaltBlue;
+    default:              return GColorClear;
+  }
+}
+
 // Saturated colors chosen to stay legible on the white (unselected) row bg.
 static GColor tg_color(TgType t) {
   switch (t) {
@@ -133,7 +176,7 @@ static void load_state(void) {
   }
   if (persist_exists(PKEY_FILTER)) {
     s_filter = persist_read_int(PKEY_FILTER);
-    if (s_filter < 0 || s_filter >= FILTER_COUNT) s_filter = FILTER_HOME;
+    if (s_filter < 0 || s_filter >= VIEW_COUNT) s_filter = VIEW_HOME;
   }
   s_count = persist_read_int(PKEY_COUNT);
   if (s_count < 0) s_count = 0;
@@ -148,44 +191,67 @@ static void load_state(void) {
 // ---------------------------------------------------------------------------
 // Status bar
 // ---------------------------------------------------------------------------
+static void update_member_header(void);
+
 static void update_status_layer(void) {
   static char buf[48];
-  snprintf(buf, sizeof(buf), "%s \xC2\xB7 %s", FILTER_NAMES[s_filter], s_status);
+  snprintf(buf, sizeof(buf), "%s \xC2\xB7 %s", VIEW_NAMES[s_filter], s_status);
   if (s_status_layer) {
     text_layer_set_text(s_status_layer, buf);
   }
+  update_member_header();
 }
 
 // ---------------------------------------------------------------------------
-// Ring buffer insert (keep sorted by id descending, dedupe by id)
+// Whichever list is on screen: the incident's member calls while drilled in,
+// otherwise the feed. Everything that renders, scrolls or inserts goes through
+// these so the two lists share one set of callbacks.
 // ---------------------------------------------------------------------------
+static CallEntry *active_list(void) { return s_in_members ? s_members : s_calls; }
+static int active_count(void) { return s_in_members ? s_member_count : s_count; }
+static int active_cap(void) { return s_in_members ? MAX_MEMBERS : MAX_CALLS; }
+
+// ---------------------------------------------------------------------------
+// Ring buffer insert (sorted by `ord` descending, dedupe by id)
+// ---------------------------------------------------------------------------
+// Sorting on `ord` rather than on the id matters for incidents: the home log's
+// event_key is not guaranteed to run in time order, so the phone sends
+// start_time as the sort key and the id stays purely an identity.
 static void insert_call(const CallEntry *e) {
-  // Update in place if we already have this id.
-  for (int i = 0; i < s_count; i++) {
-    if (s_calls[i].id == e->id) {
-      s_calls[i] = *e;
+  CallEntry *list = active_list();
+  int cap = active_cap();
+  int *countp = s_in_members ? &s_member_count : &s_count;
+  int count = *countp;
+
+  // Update in place if we already have this id. Late enrichment (a summary or
+  // severity landing after the call) arrives as a re-send of the same row.
+  for (int i = 0; i < count; i++) {
+    if (list[i].id == e->id) {
+      list[i] = *e;
       return;
     }
   }
-  // Find insertion point (descending id order).
-  int pos = s_count;
-  for (int i = 0; i < s_count; i++) {
-    if (e->id > s_calls[i].id) { pos = i; break; }
+  // Find insertion point (descending sort-key order).
+  int pos = count;
+  for (int i = 0; i < count; i++) {
+    if (e->ord > list[i].ord) { pos = i; break; }
   }
-  if (pos >= MAX_CALLS) return; // older than everything we keep
+  if (pos >= cap) return; // older than everything we keep
 
-  int last = (s_count < MAX_CALLS) ? s_count : MAX_CALLS - 1;
+  int last = (count < cap) ? count : cap - 1;
   for (int i = last; i > pos; i--) {
-    s_calls[i] = s_calls[i - 1];
+    list[i] = list[i - 1];
   }
-  s_calls[pos] = *e;
-  if (s_count < MAX_CALLS) s_count++;
+  list[pos] = *e;
+  if (count < cap) (*countp)++;
 }
 
 // Row currently holding this call id, or -1 if it has aged out of the buffer.
 static int find_call_index(int32_t id) {
-  for (int i = 0; i < s_count; i++) {
-    if (s_calls[i].id == id) return i;
+  CallEntry *list = active_list();
+  int count = active_count();
+  for (int i = 0; i < count; i++) {
+    if (list[i].id == id) return i;
   }
   return -1;
 }
@@ -194,7 +260,8 @@ static int find_call_index(int32_t id) {
 // Menu layer callbacks
 // ---------------------------------------------------------------------------
 static uint16_t menu_get_num_rows(MenuLayer *menu, uint16_t section, void *ctx) {
-  return s_count > 0 ? s_count : 1;
+  int n = active_count();
+  return n > 0 ? n : 1;   // one row for the "waiting"/"loading" placeholder
 }
 
 static int16_t menu_get_cell_height(MenuLayer *menu, MenuIndex *idx, void *ctx) {
@@ -204,17 +271,37 @@ static int16_t menu_get_cell_height(MenuLayer *menu, MenuIndex *idx, void *ctx) 
 static void menu_draw_row(GContext *gctx, const Layer *cell, MenuIndex *idx, void *ctx) {
   GRect b = layer_get_bounds(cell);
 
-  if (s_count == 0) {
+  if (active_count() == 0) {
     graphics_context_set_text_color(gctx, GColorDarkGray);
-    graphics_draw_text(gctx, "Waiting for feed...",
+    graphics_draw_text(gctx, s_in_members ? "Loading calls..." : "Waiting for feed...",
                        fonts_get_system_font(FONT_KEY_GOTHIC_18),
                        GRect(6, 12, b.size.w - 12, 24),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     return;
   }
 
-  CallEntry *e = &s_calls[idx->row];
+  CallEntry *e = &active_list()[idx->row];
   bool selected = menu_cell_layer_is_highlighted(cell);
+
+  // Left-edge accent: how close to home this happened. Tier outranks severity
+  // in what the user actually wants to notice, so it gets the persistent
+  // visual channel and severity only tints the text.
+  int text_x = 6;
+#if defined(PBL_COLOR)
+  if (e->tier) {
+    graphics_context_set_fill_color(gctx, tier_color(e->tier));
+    graphics_fill_rect(gctx, GRect(0, 0, 4, b.size.h), 0, GCornerNone);
+    text_x = 10;
+  }
+#else
+  // No colour to spend, so mark the closest tier with a bar the same way and
+  // let the rest go unmarked rather than inventing greys.
+  if (e->tier >= TIER_HOME_BLOCK) {
+    graphics_context_set_fill_color(gctx, GColorBlack);
+    graphics_fill_rect(gctx, GRect(0, 0, 4, b.size.h), 0, GCornerNone);
+    text_x = 10;
+  }
+#endif
 
   // Time stays neutral; the talkgroup tag carries the agency color so the feed
   // is quick to scan. Emergency calls override to red for both.
@@ -233,19 +320,19 @@ static void menu_draw_row(GContext *gctx, const Layer *cell, MenuIndex *idx, voi
   graphics_context_set_text_color(gctx, time_color);
   graphics_draw_text(gctx, e->time,
                      fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-                     GRect(6, -2, 78, 20),
+                     GRect(text_x, -2, 78, 20),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   graphics_context_set_text_color(gctx, tag_color);
   graphics_draw_text(gctx, e->tag,
                      fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-                     GRect(84, -2, b.size.w - 90, 20),
+                     GRect(text_x + 78, -2, b.size.w - text_x - 84, 20),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
 
   // Bottom line: transcript snippet
   graphics_context_set_text_color(gctx, selected ? GColorWhite : GColorBlack);
   graphics_draw_text(gctx, e->text,
                      fonts_get_system_font(FONT_KEY_GOTHIC_18),
-                     GRect(6, 20, b.size.w - 12, 24),
+                     GRect(text_x, 20, b.size.w - text_x - 6, 24),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
@@ -264,17 +351,38 @@ static void send_filter(void) {
   }
 }
 
+// Ask the phone to open (or close) one incident's member calls.
+static void send_cmd(int cmd, int32_t inc_id) {
+  DictionaryIterator *out;
+  if (app_message_outbox_begin(&out) != APP_MSG_OK) return;
+  dict_write_int(out, MESSAGE_KEY_CMD, &cmd, sizeof(int), true);
+  if (inc_id) {
+    dict_write_int(out, MESSAGE_KEY_CALL_INC, &inc_id, sizeof(int32_t), true);
+  }
+  app_message_outbox_send();
+}
+
+static void push_members(int32_t inc_id);
+
+// SELECT always goes one level deeper: an incident opens its calls, a call
+// opens its transcript. An unclustered incident (inc == 0) has no call list to
+// open, so it behaves like a leaf and shows its text directly.
 static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
-  if (s_count == 0) return;
+  if (active_count() == 0) return;
+  CallEntry *e = &active_list()[idx->row];
+  if (!s_in_members && e->inc) {
+    push_members(e->inc);
+    return;
+  }
   push_detail(idx->row);
 }
 
 static void cycle_filter(void) {
-  s_filter = (s_filter + 1) % FILTER_COUNT;
+  s_filter = (s_filter + 1) % VIEW_COUNT;
   // Clear the cache so the new preset starts clean; JS resets its lastMaxId to
   // match and resends the current window for this filter.
   s_count = 0;
-  s_detail_id = 0;   // the call it pointed at is gone with the cache
+  s_detail_id = 0;   // the row it pointed at is gone with the cache
   if (s_menu_layer) {
     menu_layer_reload_data(s_menu_layer);
     menu_layer_set_selected_index(s_menu_layer,
@@ -293,11 +401,87 @@ static void menu_select_long_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
 }
 
 // ---------------------------------------------------------------------------
+// Member-call window — the calls that make up one incident
+//
+// A real window rather than a swapped-out buffer behind the same one, so BACK
+// pops it natively. Overriding BACK on the main window would mean replacing the
+// MenuLayer's own click config provider and re-implementing its scrolling.
+// ---------------------------------------------------------------------------
+static Window    *s_member_window;
+static MenuLayer *s_member_menu;
+static TextLayer *s_member_status;
+static char       s_member_head[48];
+
+// Without a header the member list is three near-identical rows with no cue
+// that you drilled in at all — so it keeps the same black bar as the feed,
+// carrying the phone's "N calls" and the drill-down arrow.
+static void update_member_header(void) {
+  if (!s_member_status) return;
+  snprintf(s_member_head, sizeof(s_member_head), "\xE2\x80\xB9 %s", s_status);
+  text_layer_set_text(s_member_status, s_member_head);
+}
+
+static void member_window_load(Window *window) {
+  Layer *root = window_get_root_layer(window);
+  GRect b = layer_get_bounds(root);
+
+  const int status_h = 26;
+  s_member_status = text_layer_create(GRect(0, 0, b.size.w, status_h));
+  text_layer_set_background_color(s_member_status, GColorBlack);
+  text_layer_set_text_color(s_member_status, GColorWhite);
+  text_layer_set_font(s_member_status, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  text_layer_set_text_alignment(s_member_status, GTextAlignmentCenter);
+  layer_add_child(root, text_layer_get_layer(s_member_status));
+  update_member_header();
+
+  b.origin.y += status_h;
+  b.size.h -= status_h;
+  s_member_menu = menu_layer_create(b);
+  menu_layer_set_callbacks(s_member_menu, NULL, (MenuLayerCallbacks){
+    .get_num_rows = menu_get_num_rows,
+    .get_cell_height = menu_get_cell_height,
+    .draw_row = menu_draw_row,
+    .select_click = menu_select_click,
+  });
+  menu_layer_set_click_config_onto_window(s_member_menu, window);
+#if defined(PBL_COLOR)
+  menu_layer_set_highlight_colors(s_member_menu, GColorCobaltBlue, GColorWhite);
+#endif
+  layer_add_child(root, menu_layer_get_layer(s_member_menu));
+}
+
+static void member_window_unload(Window *window) {
+  menu_layer_destroy(s_member_menu);
+  text_layer_destroy(s_member_status);
+  s_member_menu = NULL;
+  s_member_status = NULL;
+  // Back on the feed: let the phone resume polling and re-send the list.
+  s_in_members = false;
+  s_member_count = 0;
+  send_cmd(CMD_CLOSE_INCIDENT, 0);
+  if (s_menu_layer) menu_layer_reload_data(s_menu_layer);
+}
+
+static void push_members(int32_t inc_id) {
+  s_in_members = true;
+  s_member_count = 0;
+  if (!s_member_window) {
+    s_member_window = window_create();
+    window_set_window_handlers(s_member_window, (WindowHandlers){
+      .load = member_window_load,
+      .unload = member_window_unload,
+    });
+  }
+  send_cmd(CMD_OPEN_INCIDENT, inc_id);
+  window_stack_push(s_member_window, true);
+}
+
+// ---------------------------------------------------------------------------
 // Detail window — full transcript
 // ---------------------------------------------------------------------------
 static void push_detail(int row) {
   s_detail_index = row;
-  s_detail_id = s_calls[row].id;
+  s_detail_id = active_list()[row].id;
   if (!s_detail_window) {
     s_detail_window = window_create();
     window_set_window_handlers(s_detail_window, (WindowHandlers){
@@ -312,8 +496,8 @@ static void push_detail(int row) {
 // header + body text, resize the scroll content, reset to the top, and keep the
 // list selection in sync so backing out lands on the call you ended on.
 static void detail_render(void) {
-  if (!s_detail_text || s_detail_index < 0 || s_detail_index >= s_count) return;
-  CallEntry *e = &s_calls[s_detail_index];
+  if (!s_detail_text || s_detail_index < 0 || s_detail_index >= active_count()) return;
+  CallEntry *e = &active_list()[s_detail_index];
 
   // Header: time + talkgroup, color-coded by agency type (red for emergency)
   // to match the list. Stays fixed at the top while the transcript scrolls.
@@ -323,6 +507,12 @@ static void detail_render(void) {
 #ifdef PBL_COLOR
   hc = e->emergency ? GColorRed : tg_color(tg_type(e->tag));
 #endif
+  // Spell the tier out here — the list's accent bar is a glance cue, but the
+  // detail view is where "this was on your block" should be unambiguous.
+  if (e->tier >= TIER_HOME_BLOCK) {
+    snprintf(s_detail_head, sizeof(s_detail_head), "%s  %s\nHOME BLOCK",
+             e->time, e->tag);
+  }
   text_layer_set_text_color(s_detail_header, hc);
 
   // Body: incident type / city (when present) + the transcript, kept neutral
@@ -343,8 +533,9 @@ static void detail_render(void) {
   scroll_layer_set_content_size(s_detail_scroll, GSize(tf.size.w + 8, used.h + 20));
   scroll_layer_set_content_offset(s_detail_scroll, GPoint(0, 0), false);
 
-  if (s_menu_layer) {
-    menu_layer_set_selected_index(s_menu_layer,
+  MenuLayer *m = s_in_members ? s_member_menu : s_menu_layer;
+  if (m) {
+    menu_layer_set_selected_index(m,
       (MenuIndex){ .section = 0, .row = s_detail_index }, MenuRowAlignCenter, false);
   }
 }
@@ -360,7 +551,7 @@ static void detail_up_click(ClickRecognizerRef rec, void *ctx) {
     scroll_layer_set_content_offset(s_detail_scroll, GPoint(0, ny), true);
   } else if (s_detail_index > 0) {
     s_detail_index--;
-    s_detail_id = s_calls[s_detail_index].id;
+    s_detail_id = active_list()[s_detail_index].id;
     detail_render();
   }
 }
@@ -378,9 +569,9 @@ static void detail_down_click(ClickRecognizerRef rec, void *ctx) {
     int ny = off.y - page;
     if (ny < min_y) ny = min_y;
     scroll_layer_set_content_offset(s_detail_scroll, GPoint(0, ny), true);
-  } else if (s_detail_index < s_count - 1) {
+  } else if (s_detail_index < active_count() - 1) {
     s_detail_index++;
-    s_detail_id = s_calls[s_detail_index].id;
+    s_detail_id = active_list()[s_detail_index].id;
     detail_render();
   }
 }
@@ -473,14 +664,22 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   e.id = id_t ? id_t->value->int32 : 0;
   Tuple *em_t = dict_find(iter, MESSAGE_KEY_CALL_EMERG);
   e.emergency = (em_t && em_t->value->int32) ? 1 : 0;
+  Tuple *ti_t = dict_find(iter, MESSAGE_KEY_CALL_TIER);
+  e.tier = ti_t ? (uint8_t)ti_t->value->int32 : 0;
+  Tuple *in_t = dict_find(iter, MESSAGE_KEY_CALL_INC);
+  e.inc = in_t ? in_t->value->int32 : 0;
+  Tuple *or_t = dict_find(iter, MESSAGE_KEY_CALL_ORD);
+  // Fall back to the id so a row without an explicit sort key still orders.
+  e.ord = or_t ? or_t->value->int32 : 0;
   copy_tuple_str(iter, MESSAGE_KEY_CALL_TIME, e.time, sizeof(e.time));
   copy_tuple_str(iter, MESSAGE_KEY_CALL_TAG,  e.tag,  sizeof(e.tag));
   copy_tuple_str(iter, MESSAGE_KEY_CALL_CAT,  e.cat,  sizeof(e.cat));
   copy_tuple_str(iter, MESSAGE_KEY_CALL_TEXT, e.text, sizeof(e.text));
 
   if (e.id == 0) return;
+  if (e.ord == 0) e.ord = e.id;
 
-  bool was_empty = (s_count == 0);
+  bool was_empty = (active_count() == 0);
   insert_call(&e);
 
   // A newer call shifts every older row down one. Re-pin the detail view to the
@@ -494,14 +693,14 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   snprintf(s_status, sizeof(s_status), "live");
   update_status_layer();
 
-  if (s_menu_layer) {
-    menu_layer_reload_data(s_menu_layer);
-    // Keep the user pinned to the top so newest calls stay in view, but only
-    // if they were already at/near the top (don't yank them mid-scroll).
-    MenuIndex sel = menu_layer_get_selected_index(s_menu_layer);
+  MenuLayer *m = s_in_members ? s_member_menu : s_menu_layer;
+  if (m) {
+    menu_layer_reload_data(m);
+    // Keep the user pinned to the top so newest rows stay in view, but only if
+    // they were already at/near the top (don't yank them mid-scroll).
+    MenuIndex sel = menu_layer_get_selected_index(m);
     if (was_empty || sel.row == 0) {
-      menu_layer_set_selected_index(s_menu_layer,
-        (MenuIndex){0, 0}, MenuRowAlignTop, false);
+      menu_layer_set_selected_index(m, (MenuIndex){0, 0}, MenuRowAlignTop, false);
     }
   }
 }
@@ -592,6 +791,7 @@ static void deinit(void) {
   save_state();
   window_destroy(s_main_window);
   if (s_detail_window) window_destroy(s_detail_window);
+  if (s_member_window) window_destroy(s_member_window);
 }
 
 int main(void) {

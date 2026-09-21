@@ -21,7 +21,7 @@ static inline GPoint GPoint_(int16_t x, int16_t y) { GPoint p = {x,y}; return p;
 typedef struct { uint8_t argb; } GColor;
 extern GColor GColorWhite, GColorBlack, GColorRed, GColorBlue, GColorDarkGray,
               GColorOrange, GColorWindsorTan, GColorIslamicGreen,
-              GColorImperialPurple, GColorCobaltBlue;
+              GColorImperialPurple, GColorCobaltBlue, GColorYellow, GColorClear;
 
 typedef struct Layer Layer;
 typedef struct Window Window;
@@ -103,6 +103,10 @@ bool menu_cell_layer_is_highlighted(const Layer *);
 
 GFont fonts_get_system_font(const char *);
 void graphics_context_set_text_color(GContext *, GColor);
+void graphics_context_set_fill_color(GContext *, GColor);
+typedef int GCornerMask;
+#define GCornerNone 0
+void graphics_fill_rect(GContext *, GRect, uint16_t, GCornerMask);
 void graphics_draw_text(GContext *, const char *, GFont, GRect, GTextOverflowMode,
                         GTextAlignment, GTextAttributes);
 
@@ -133,3 +137,7 @@ void app_event_loop(void);
 #define MESSAGE_KEY_CALL_EMERG 7
 #define MESSAGE_KEY_STATUS 8
 #define MESSAGE_KEY_FILTER 9
+#define MESSAGE_KEY_CMD 10
+#define MESSAGE_KEY_CALL_TIER 11
+#define MESSAGE_KEY_CALL_ORD 12
+#define MESSAGE_KEY_CALL_INC 13

@@ -2,7 +2,7 @@
 // Scanner Feed — PebbleKit JS bridge (runs on the phone)
 //
 // Polls the scanner backend's live-tail feed, filters by the active preset
-// (Home / Local / Utah Co / All / Favorites), optionally drops muted talkgroups, and
+// incident-grain home log by default (call-grain live tail on demand), and
 // pushes one AppMessage per call to the watch. Credentials, host, favorite
 // areas and muted talkgroups come from the Clay settings page (config.js).
 //
@@ -13,8 +13,14 @@
 // redirect, hitting the old host fails basic auth ("auth failed") AND returns
 // HTML ("bad data"). So we target data.zarchstuff.com directly, no redirect.
 //
-//   GET /feed/api/feed?limit=N&areas=...   -> {calls:[...], next_cursor}  (seed/history, newest-first)
-//   GET /feed/api/since?after_id=ID&areas= -> {calls:[...], max_id}        (live-tail; server filters hallucinations)
+//   GET /reports/api/home-log?scope=S&limit=N -> {incidents:[...], ...}
+//        Incident-grain log for the home geography, newest-first. THE DEFAULT
+//        VIEW: one row per incident (or per unclustered call), carrying the
+//        stored relevance tiers. `scope` widens the geography:
+//        home(home_block) < ward < neighborhood < nearby(~1mi).
+//   GET /feed/api/incident/<id>            -> {incident_id, calls:[...]}  (drill-down, chronological)
+//   GET /feed/api/feed?limit=N&areas=...   -> {calls:[...], next_cursor}  (live seed/history, newest-first)
+//   GET /feed/api/since?after_id=ID&areas= -> {calls:[...], max_id}       (live-tail; server filters hallucinations)
 // ---------------------------------------------------------------------------
 
 var Clay = require('pebble-clay');
@@ -25,35 +31,51 @@ var clay = new Clay(clayConfig, null, { autoHandleEvents: false });
 var MSG_CALL = 0;
 var MSG_STATUS = 1;
 
-// Filter presets (must match main.c)
-var FILTER_HOME = 0;  // strict home area (HOME_AREAS setting) — the default
-var FILTER_LOCAL = 1;
-var FILTER_UTCO = 2;
-var FILTER_ALL = 3;
-var FILTER_FAV = 4;   // user-configured "Favorites" areas (FAVE_AREAS setting)
+// Views (must match main.c). 0-3 are incident-grain home-log scopes, widening
+// outward from the home block; 4 is the call-grain live tail. Incidents lead
+// because what happened near home matters more than the running commentary —
+// the live feed is the interesting one, not the important one.
+var VIEW_HOME = 0;    // home_block only
+var VIEW_WARD = 1;    // + ward_household
+var VIEW_NBHD = 2;    // + neighborhood_grid
+var VIEW_NEARBY = 3;  // + near_home_area (~1 mi)
+var VIEW_LIVE = 4;    // live call tail, HOME_AREAS preset
+var VIEW_COUNT = 5;
+
+// Maps a view to the home-log `scope` parameter (HOME_LOG_SCOPES in the
+// backend's analytics/app/home_log.py).
+var VIEW_SCOPES = ['home', 'ward', 'neighborhood', 'nearby'];
+
+var SEVERITY_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
+// "Significant" floor for the incident views. Medium and up, EXCEPT that a
+// home-block incident is never filtered out at any severity — the whole point
+// of the view is that proximity outranks severity.
+var MIN_SEVERITY_RANK = SEVERITY_RANK.medium;
 
 // Filter -> backend `areas` chips (keys from analytics/app/areas.py). The
 // backend resolves each area to tg_alpha_tag substrings, so we think in
 // agencies, not talkgroup numbers. ALL sends no area filter (everything).
 //
-//   Home    = just the home city, and the default. Mirrors the backend's own
-//             MY_AREA_DEFAULT (["Orem"]); the "Orem" chip already resolves to
-//             Orem/Lindon PD plus Orem Fire and the shared POL Fire dispatch,
-//             so one chip is genuinely police + fire for home. Override with
-//             the HOME_AREAS setting.
-//   Local   = the busiest nearby agencies — guarantees a steady feed.
-//             (Orem/Lindon PD is by far the highest-volume TG.)
-//   Utah Co = every Utah-County-area chip.
+// The live tail is scoped to the home area, mirroring the backend's own
+// MY_AREA_DEFAULT (["Orem"]): the "Orem" chip resolves to Orem/Lindon PD plus
+// Orem Fire and the shared POL Fire dispatch, so one chip is genuinely police
+// + fire for home. Override with the HOME_AREAS setting.
 var DEFAULT_HOME_AREAS = 'Orem';
-var LOCAL_AREAS = ['Orem', 'Lehi', 'American Fork', 'UtCo Sheriff', 'UtCo Fire/EMS'];
-var UTCO_AREAS = ['Orem', 'Provo', 'Lehi', 'American Fork', 'Springville',
-                  'Spanish Fork', 'UtCo Sheriff', 'UtCo Fire/EMS'];
 
-var SEED_LIMIT = 24;     // history to pull on launch / filter switch (= watch MAX_CALLS)
-var POLL_MS = 10000;
-var activeFilter = FILTER_HOME;
+var SEED_LIMIT = 24;     // history to pull on launch / view switch (= watch MAX_CALLS)
+// The live tail is a cheap indexed lookup by id, so poll it hard. The home log
+// aggregates member calls per incident and is far heavier — a 10s poll on it
+// would hammer the two sync gunicorn workers for data that changes on the
+// order of minutes.
+var POLL_LIVE_MS = 10000;
+var POLL_LOG_MS = 60000;
+var activeView = VIEW_HOME;
 var lastMaxId = 0;       // server-side cursor: highest call id we've sent
 var pollTimer = null;
+// Set while the watch is drilled into one incident's member calls. Polling
+// pauses there: the member list is a fixed, chronological set, and pushing
+// fresh feed rows underneath the user would be nothing but confusing.
+var openIncidentId = 0;
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -82,9 +104,8 @@ function getConfig() {
     HOST: DEFAULT_HOST,
     USERNAME: '',
     PASSWORD: '',
-    DEFAULT_FILTER: FILTER_HOME,
+    DEFAULT_FILTER: VIEW_HOME,
     HOME_AREAS: DEFAULT_HOME_AREAS,  // area chips for the strict Home preset
-    FAVE_AREAS: '',   // comma-separated area chips for the Favorites preset
     MUTE_TAGS: ''     // comma-separated tag substrings to drop from the feed
   };
   var raw = localStorage.getItem('config');
@@ -217,6 +238,35 @@ function clockOf(raw) {
   return m ? m[1] : String(raw || '').slice(-8);
 }
 
+// Personal-relevance tiers, from the backend's enricher (relevance_score() in
+// enricher/neighborhood.py). The dashboard's "Notable" query orders by this
+// ladder ahead of severity, and so does the watch: an ordinary call on the home
+// block matters more than a critical one across the county.
+//
+// Sent as a small int because the watch sorts and colours on it; 0 covers both
+// 'external' and a row the enricher hasn't scored yet.
+var TIER_RANK = {
+  home_block: 4,
+  ward_household: 3,
+  neighborhood_grid: 2,
+  broader_orem: 1,
+  external: 0
+};
+
+// A tier is only trustworthy once enrichment has confirmed it. The pre-Whisper
+// scorer runs before `calls.city` is populated and mis-fires home_block on
+// cross-city grid collisions — a Spanish Fork address landing on Orem's grid
+// (see B-2026-05-12-1 / B-2026-05-15-1 in the backend's BUGS.md). The enricher
+// rescore fixes the row ~30s later, so trust the tier only when the row says it
+// has been enriched; treat an unenriched row as untiered rather than badging a
+// call as "home block" on the strength of data the backend itself retracts.
+function tierRank(call) {
+  var enriched = pick(call, ['enriched']);
+  if (enriched !== '' && !Number(enriched)) return 0;
+  var tier = String(pick(call, ['relevance_tier', 'tier'])).toLowerCase();
+  return TIER_RANK[tier] || 0;
+}
+
 function sendCall(call) {
   // New feed has no `emergency` bool — derive urgency from enrichment severity.
   var sev = pick(call, ['severity']);
@@ -236,7 +286,75 @@ function sendCall(call) {
     CALL_TAG: String(pick(call, ['tg_alpha_tag', 'talkgroup', 'tg'])).slice(0, 26),
     CALL_CAT: String(cat).slice(0, 18),
     CALL_TEXT: String(text).slice(0, 156),
-    CALL_EMERG: emergency
+    CALL_EMERG: emergency,
+    CALL_TIER: tierRank(call),
+    // Live-call ids are monotonic, so the id doubles as the sort key.
+    CALL_ORD: Number(call.id) || 0,
+    CALL_INC: 0   // a call row is already the leaf; nothing to drill into
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Incident rows (home log)
+// ---------------------------------------------------------------------------
+// Highest tier among an incident's member calls. home_log returns `tiers` as an
+// array because one incident can span several — a call on the home block and a
+// follow-up two streets over cluster together, and the row should read as the
+// closer of the two.
+function incidentTier(inc) {
+  var tiers = inc.tiers || [];
+  var best = 0;
+  for (var i = 0; i < tiers.length; i++) {
+    var r = TIER_RANK[String(tiers[i]).toLowerCase()] || 0;
+    if (r > best) best = r;
+  }
+  return best;
+}
+
+// The "significant" gate. Medium and up, except that a home-block incident
+// always passes: a minor call on your own block is the thing this view exists
+// to surface, and severity is the backend's judgement of the radio traffic,
+// not of how much it matters to you.
+function isSignificant(inc) {
+  if (incidentTier(inc) >= TIER_RANK.home_block) return true;
+  return (SEVERITY_RANK[String(inc.severity || '').toLowerCase()] || 0)
+           >= MIN_SEVERITY_RANK;
+}
+
+function sendIncident(inc) {
+  var sev = String(inc.severity || '').toLowerCase();
+  var emergency = (sev === 'critical' || sev === 'high') ? 1 : 0;
+  // Secondary line: what happened, else where. Append the member-call count
+  // when an incident is more than a single call — "3 calls" is a useful signal
+  // that something is still developing.
+  var cat = pick(inc, ['incident_type', 'city']);
+  // The list row only has room for time, agency and one line of summary — `cat`
+  // is detail-only. The member count is worth more than that: "5 calls" is how
+  // you tell a finished incident from one still developing, at a glance. So it
+  // rides the agency tag, which is what the list actually draws.
+  //
+  // U+00B7 middle dot, written as the character rather than as its UTF-8 bytes:
+  // the AppMessage layer encodes the string itself, so a hand-rolled \xC2\xB7
+  // gets double-encoded and lands on the watch as mojibake.
+  var n = Number(inc.local_call_count || inc.incident_member_count || 0);
+  var tag = String(pick(inc, ['agency', 'tg_alpha_tag']));
+  if (n > 1) tag = tag.slice(0, 20) + ' \u00B7' + n;
+  // Prefer the LLM summary; fall back to the representative call's transcript.
+  var text = pick(inc, ['summary', 'representative_excerpt', 'latest_excerpt']);
+  enqueue({
+    MSG_TYPE: MSG_CALL,
+    CALL_ID: Number(inc.event_key) || 0,
+    CALL_TIME: clockOf(pick(inc, ['start_time'])),
+    CALL_TAG: tag.slice(0, 26),
+    CALL_CAT: String(cat).slice(0, 24),
+    CALL_TEXT: String(text).slice(0, 156),
+    CALL_EMERG: emergency,
+    CALL_TIER: incidentTier(inc),
+    // event_key is not guaranteed to run in time order, so sort on start_time
+    // rather than on the id the way the live tail does.
+    CALL_ORD: Number(inc.start_time) || 0,
+    // 0 for an unclustered single call — the watch then has nothing to open.
+    CALL_INC: Number(inc.incident_id) || 0
   });
 }
 
@@ -262,22 +380,13 @@ function isMuted(cfg, call) {
   return false;
 }
 
+// The live tail is scoped to the home area. An empty setting falls back to the
+// built-in default rather than widening to everything — the one preset the user
+// never explicitly chose must not quietly become statewide.
 function areaParam(cfg) {
-  if (activeFilter === FILTER_ALL) return '';
-  if (activeFilter === FILTER_FAV) {
-    var fav = parseList(cfg.FAVE_AREAS);
-    if (!fav.length) return '';  // no favorites configured -> behave like All
-    return '&areas=' + encodeURIComponent(fav.join(','));
-  }
-  if (activeFilter === FILTER_HOME) {
-    // Home is the default preset, so it must never silently widen to All the
-    // way Faves does — an empty setting falls back to the built-in home area.
-    var home = parseList(cfg.HOME_AREAS);
-    if (!home.length) home = parseList(DEFAULT_HOME_AREAS);
-    return '&areas=' + encodeURIComponent(home.join(','));
-  }
-  var areas = (activeFilter === FILTER_UTCO) ? UTCO_AREAS : LOCAL_AREAS;
-  return '&areas=' + encodeURIComponent(areas.join(','));
+  var home = parseList(cfg.HOME_AREAS);
+  if (!home.length) home = parseList(DEFAULT_HOME_AREAS);
+  return '&areas=' + encodeURIComponent(home.join(','));
 }
 
 function apiGet(cfg, path, onJson) {
@@ -299,6 +408,56 @@ function apiGet(cfg, path, onJson) {
   xhr.onerror = function () { sendStatus('offline @' + tag); };
   xhr.ontimeout = function () { sendStatus('timeout @' + tag); };
   xhr.send();
+}
+
+// ---------------------------------------------------------------------------
+// Incident log (the default view)
+// ---------------------------------------------------------------------------
+// No cursor here: the home log has no "since" endpoint, so each poll re-reads
+// the top of the list. The watch dedupes by id and updates rows in place, so
+// re-sending a row it already holds is cheap and keeps late enrichment (a
+// summary or severity landing minutes after the call) flowing through.
+function pollHomeLog(cfg) {
+  var scope = VIEW_SCOPES[activeView] || VIEW_SCOPES[0];
+  apiGet(cfg, '/reports/api/home-log?scope=' + scope + '&limit=' + SEED_LIMIT,
+    function (body) {
+      // The endpoint answers 200 with unavailable:true when its query fails,
+      // rather than an error status — so check the flag, not just the code.
+      if (body && body.unavailable) { sendStatus('log down'); return; }
+      var incs = (body && body.incidents) || [];
+      var shown = 0;
+      // Newest-first from the server; send oldest-first so the watch's "pin to
+      // top" lands on the most recent.
+      for (var i = incs.length - 1; i >= 0; i--) {
+        if (!isSignificant(incs[i])) continue;
+        sendIncident(incs[i]);
+        shown++;
+      }
+      // Distinguish "nothing happened near home" (the good, common case) from
+      // "everything was filtered out", which means the floor is set too high.
+      if (!shown) {
+        sendStatus(incs.length ? 'none sig' : 'all quiet');
+        return;
+      }
+      // The status bar already names the view, so echoing the scope back would
+      // just read "Home \u00B7 home". The count is the thing it doesn't know.
+      sendStatus(shown + ' inc');
+    });
+}
+
+// Drill-down: the member calls of one incident, chronological.
+function fetchIncidentCalls(cfg, incId) {
+  apiGet(cfg, '/feed/api/incident/' + incId, function (body) {
+    var calls = (body && body.calls) || [];
+    if (!calls.length) { sendStatus('no calls'); return; }
+    // Chronological from the server. The watch sorts newest-first, so order
+    // here doesn't matter for placement — but send oldest-first anyway so the
+    // list settles on the newest call the same way every other view does.
+    for (var i = 0; i < calls.length; i++) {
+      if (!isMuted(cfg, calls[i])) sendCall(calls[i]);
+    }
+    sendStatus(calls.length + ' calls');
+  });
 }
 
 // Seed: pull recent history for the active preset and prime the cursor.
@@ -340,29 +499,50 @@ function pollSince(cfg) {
 function poll() {
   var cfg = getConfig();
   if (!cfg.HOST) { sendStatus('set host'); return; }
+  // Drilled into an incident: its member list is fixed, so hold still.
+  if (openIncidentId) return;
   // The backend is gated by NPM basic auth, so a missing credential is a
   // guaranteed 401. Surface that distinctly instead of letting it come back as
   // the ambiguous 'auth failed' (which otherwise can't be told apart from
   // *wrong* creds — see the credential-preserving save in webviewclosed).
   if (!cfg.USERNAME) { sendStatus('set creds @' + hostTag(cfg.HOST)); return; }
+
+  if (activeView !== VIEW_LIVE) { pollHomeLog(cfg); return; }
   if (lastMaxId === 0) seed(cfg);
   else pollSince(cfg);
 }
 
-function applyFilter(f) {
-  activeFilter = f;
-  lastMaxId = 0; // watch cleared its cache on switch — reseed history for the new preset
-  poll();
+function applyView(v) {
+  if (isNaN(v) || v < 0 || v >= VIEW_COUNT) return;
+  activeView = v;
+  openIncidentId = 0;
+  lastMaxId = 0;  // watch cleared its cache on switch — reseed for the new view
+  startPolling();
+}
+
+// The watch asks to open an incident; reply with its member calls and stop
+// polling until it backs out.
+function openIncident(incId) {
+  openIncidentId = incId;
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  fetchIncidentCalls(getConfig(), incId);
+}
+
+function closeIncident() {
+  openIncidentId = 0;
+  lastMaxId = 0;  // the watch cleared its cache on the way out
+  startPolling();
 }
 
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
   // Announce the target host on launch so the watch confirms which backend
   // it's hitting (i.e. that the transcripts->data migration fired). The first
-  // poll result overwrites this with 'live' a moment later.
+  // poll result overwrites this a moment later.
   sendStatus('-> ' + getConfig().HOST);
   poll();
-  pollTimer = setInterval(poll, POLL_MS);
+  var every = (activeView === VIEW_LIVE) ? POLL_LIVE_MS : POLL_LOG_MS;
+  pollTimer = setInterval(poll, every);
 }
 
 // ---------------------------------------------------------------------------
@@ -371,14 +551,26 @@ function startPolling() {
 Pebble.addEventListener('ready', function () {
   var cfg = getConfig();
   var df = parseInt(cfg.DEFAULT_FILTER, 10);
-  activeFilter = isNaN(df) ? FILTER_HOME : df;
+  activeView = (isNaN(df) || df < 0 || df >= VIEW_COUNT) ? VIEW_HOME : df;
   startPolling();
 });
 
+// CMD values (must match main.c)
+var CMD_OPEN_INCIDENT = 1;
+var CMD_CLOSE_INCIDENT = 2;
+
 Pebble.addEventListener('appmessage', function (e) {
-  if (e.payload && e.payload.FILTER !== undefined) {
-    applyFilter(e.payload.FILTER);
+  var p = e && e.payload;
+  if (!p) return;
+  if (p.CMD === CMD_OPEN_INCIDENT && p.CALL_INC) {
+    openIncident(p.CALL_INC);
+    return;
   }
+  if (p.CMD === CMD_CLOSE_INCIDENT) {
+    closeIncident();
+    return;
+  }
+  if (p.FILTER !== undefined) applyView(p.FILTER);
 });
 
 // Clay config page (autoHandleEvents:false — we persist settings ourselves).
@@ -414,7 +606,6 @@ Pebble.addEventListener('webviewclosed', function (e) {
   var pass = String(settingValue(settings, 'PASSWORD'));
   var df = parseInt(settingValue(settings, 'DEFAULT_FILTER'), 10);
   var home = String(settingValue(settings, 'HOME_AREAS')).trim();
-  var fave = String(settingValue(settings, 'FAVE_AREAS')).trim();
   var mute = String(settingValue(settings, 'MUTE_TAGS')).trim();
 
   // The Clay form opens blank each time (we persist config ourselves), so an
@@ -431,11 +622,8 @@ Pebble.addEventListener('webviewclosed', function (e) {
     PASSWORD: pass || prev.PASSWORD,
     DEFAULT_FILTER: isNaN(df) ? prev.DEFAULT_FILTER : df,
     HOME_AREAS: listField(home, prev.HOME_AREAS) || DEFAULT_HOME_AREAS,
-    FAVE_AREAS: listField(fave, prev.FAVE_AREAS),
     MUTE_TAGS: listField(mute, prev.MUTE_TAGS)
   };
   localStorage.setItem('config', JSON.stringify(cfg));
-  activeFilter = cfg.DEFAULT_FILTER;
-  lastMaxId = 0;
-  startPolling();
+  applyView(parseInt(cfg.DEFAULT_FILTER, 10));
 });

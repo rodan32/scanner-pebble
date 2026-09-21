@@ -11,7 +11,7 @@
 // container (CT137) over http, which bypasses the NPM basic-auth gate — so we
 // test the exact production paths + query params without needing creds.
 //
-//   node test/harness.js [home|local|utco|all|fav]
+//   node test/harness.js [home|ward|nbhd|nearby|live]
 //
 // Pass --offline to serve canned payloads from test/fixtures.json instead of
 // the LAN. That needs no network at all, so it runs anywhere (and in CI) and is
@@ -27,14 +27,11 @@ const INTERNAL = { host: '192.168.0.177', port: 80 }; // CT137 analytics, no aut
 const PROD_HOST = 'data.zarchstuff.com';
 const OFFLINE = process.argv.includes('--offline');
 const filterArg = (process.argv.slice(2).find((a) => !a.startsWith('--')) || 'home').toLowerCase();
-const FILTER = { home: 0, local: 1, utco: 2, all: 3, fav: 4 }[filterArg];
+const FILTER = { home: 0, ward: 1, nbhd: 2, nearby: 3, live: 4 }[filterArg];
 if (FILTER === undefined) {
-  console.error('filter must be home|local|utco|all|fav'); process.exit(1);
+  console.error('view must be home|ward|nbhd|nearby|live'); process.exit(1);
 }
-// `fav` reads the preset from FAVE_AREAS rather than a built-in list, so let it
-// be supplied per-run: FAVE_AREAS="Orem, UHP" node test/harness.js fav
 const HOME_AREAS = process.env.HOME_AREAS || 'Orem';
-const FAVE_AREAS = process.env.FAVE_AREAS || 'Orem, Provo';
 const MUTE_TAGS = process.env.MUTE_TAGS || '';
 
 const FIXTURES = OFFLINE
@@ -56,7 +53,7 @@ store['config'] = JSON.stringify({
   USERNAME: process.env.SCANNER_USER || 'harness',
   PASSWORD: process.env.SCANNER_PASS || '',
   DEFAULT_FILTER: FILTER,
-  HOME_AREAS, FAVE_AREAS, MUTE_TAGS,
+  HOME_AREAS, MUTE_TAGS,
 });
 
 // --- mock: XMLHttpRequest (routes PROD_HOST -> internal CT137 over http) -----
@@ -74,7 +71,10 @@ global.XMLHttpRequest = function () {
       // Match the fixture by endpoint: /feed/api/feed is the seed, /since the
       // live tail. Reply on a later tick so the bridge's async flow is the same
       // as it is against a real server.
-      const key = reqPath.indexOf('/since') >= 0 ? 'since' : 'feed';
+      var key = 'feed';
+      if (reqPath.indexOf('/home-log') >= 0) key = 'home_log';
+      else if (reqPath.indexOf('/api/incident/') >= 0) key = 'incident';
+      else if (reqPath.indexOf('/since') >= 0) key = 'since';
       setImmediate(() => {
         this.status = 200;
         this.responseText = JSON.stringify(FIXTURES[key]);
@@ -132,12 +132,29 @@ Module._load = function (request, parent, isMain) {
 };
 
 // --- load the real bridge and drive it --------------------------------------
-console.log(`\n== Scanner Feed bridge test — filter=${filterArg.toUpperCase()}`
+console.log(`\n== Scanner Feed bridge test — view=${filterArg.toUpperCase()}`
             + `${OFFLINE ? ' (offline fixtures)' : ''} ==`);
 require(path.join(__dirname, '..', 'src', 'pkjs', 'index.js'));
 
 // 'ready' kicks off startPolling() -> first poll() does the seed (history).
 fire('ready');
+
+// --offline --open: simulate the watch pressing SELECT on an incident, which is
+// the only way to exercise the drill-down path without a watch.
+const OPEN_INC = (() => {
+  const i = process.argv.indexOf('--open');
+  return i >= 0 ? Number(process.argv[i + 1]) : 0;
+})();
+if (OPEN_INC) {
+  setTimeout(() => {
+    console.log(`\n-- SELECT on incident ${OPEN_INC} (drill down to its calls) --`);
+    fire('appmessage', { payload: { CMD: 1, CALL_INC: OPEN_INC } });
+  }, 300);
+  setTimeout(() => {
+    console.log('\n-- BACK to the incident list --');
+    fire('appmessage', { payload: { CMD: 2 } });
+  }, 900);
+}
 
 // The bridge's own setInterval (POLL_MS = 10s) fires the live-tail /since call,
 // so just stay alive long enough to watch one land, then report and exit.
