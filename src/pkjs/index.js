@@ -269,18 +269,86 @@ function tierRank(call) {
   return TIER_RANK[tier] || 0;
 }
 
+// ---------------------------------------------------------------------------
+// Junk filtering
+// ---------------------------------------------------------------------------
+// incident_type is not a free-text label: the enricher uses 'other' and
+// 'unknown' as sentinels for "could not classify", and checks for exactly that
+// set all through rules.py. Rendering one as a row's headline puts the word
+// "other" where the answer should be. Treat both as absent so the lead falls
+// through to the address, which at least says something true.
+var NON_TYPES = { other: 1, unknown: 1, '': 1 };
+
+function realType(v) {
+  var t = String(v || '').trim();
+  return NON_TYPES[t.toLowerCase()] ? '' : t;
+}
+
+// Port of the backend's looks_hallucinated (analytics/app/hallucination.py,
+// itself a port of enricher/rules.py). /feed/api/since applies it server-side;
+// the home log does not, so the watch has to. Keep in sync if that file gains
+// new signals.
+function looksHallucinated(text) {
+  if (!text) return false;
+  if (/^(?:[A-Z]-){5,}/m.test(text)) return true;
+  function topShare(tokens) {
+    if (tokens.length < 10) return 0;
+    var counts = {}, best = 0;
+    for (var i = 0; i < tokens.length; i++) {
+      var k = tokens[i];
+      counts[k] = (counts[k] || 0) + 1;
+      if (counts[k] > best) best = counts[k];
+    }
+    return best / tokens.length;
+  }
+  var words = String(text).split(/\s+/).filter(Boolean);
+  if (topShare(words) > 0.55) return true;
+  var toks = (String(text).toLowerCase().match(/\w+/g) || []);
+  return topShare(toks) > 0.55;
+}
+
+// Does this text actually say anything? A radio unit number ("632-778"), a
+// bare ten-code ("10-8") or a "Code 4" carries no meaning on a summary line —
+// the backend's own Notable query throws these out with length(transcript) >= 50.
+// Counting letters rather than characters is the honest version of that rule:
+// it keeps a terse but real summary ("Vehicle fire") and drops anything that is
+// only digits and call signs.
+function hasSubstance(text) {
+  var letterWords = String(text || '').match(/[A-Za-z]{2,}/g) || [];
+  var letters = 0;
+  for (var i = 0; i < letterWords.length; i++) letters += letterWords[i].length;
+  return letterWords.length >= 2 && letters >= 8;
+}
+
+// First candidate field that is worth putting on screen.
+function usableText(obj, names, requireSubstance) {
+  for (var i = 0; i < names.length; i++) {
+    var v = String(obj[names[i]] || '');
+    if (!v) continue;
+    if (looksHallucinated(v)) continue;
+    if (requireSubstance && !hasSubstance(v)) continue;
+    return v;
+  }
+  return '';
+}
+
 function sendCall(call) {
   // New feed has no `emergency` bool — derive urgency from enrichment severity.
   var sev = pick(call, ['severity']);
   var emergency = (sev === 'critical' || sev === 'high') ? 1 : 0;
   // No `category` anymore; the most useful secondary line is the incident type
   // (e.g. "traffic stop") or the city, when enrichment has filled them in.
-  var cat = pick(call, ['incident_type', 'city']);
+  var cat = realType(pick(call, ['incident_type'])) || pick(call, ['city']);
   // `transcript_clean` is the cleaned-up text the backend prefers everywhere it
   // renders a call; fall back to the raw transcript, then to whatever summary
   // or snippet the row carries, so a call never lands on the watch with a blank
   // body.
-  var text = pick(call, ['transcript_clean', 'transcript', 'transcript_snippet', 'summary']);
+  // No substance floor here, unlike incidents: the live tail is raw radio, and
+  // a genuinely short transmission is legitimate content there. Hallucination
+  // loops are still junk — /feed/api/since strips them server-side, this covers
+  // the drill-down, which does not.
+  var text = usableText(call, ['transcript_clean', 'transcript',
+                               'transcript_snippet', 'summary'], false);
   enqueue({
     MSG_TYPE: MSG_CALL,
     CALL_ID: call.id,
@@ -324,6 +392,16 @@ function isSignificant(inc) {
            >= MIN_SEVERITY_RANK;
 }
 
+// True when a row would reach the watch carrying no information at all: no
+// classifiable type, nowhere, and nothing readable to say. Those are the rows
+// that render as a bare timestamp next to the word "other".
+function isEmptyIncident(inc) {
+  if (realType(pick(inc, ['incident_type']))) return false;
+  if (pick(inc, ['address', 'city'])) return false;
+  return !usableText(inc, ['summary', 'representative_excerpt',
+                           'latest_excerpt'], true);
+}
+
 function sendIncident(inc) {
   var sev = String(inc.severity || '').toLowerCase();
   var emergency = (sev === 'critical' || sev === 'high') ? 1 : 0;
@@ -338,7 +416,7 @@ function sendIncident(inc) {
   // so a row never spends a line saying the same thing twice; the watch gives
   // the summary that line back when `loc` is empty.
   var where = pick(inc, ['address', 'city']);
-  var cat = pick(inc, ['incident_type']) || where;
+  var cat = realType(pick(inc, ['incident_type'])) || where;
   var loc = (where && where !== cat) ? where : '';
   // The member count rides the lead line, since that is what the list draws for
   // an incident — "5 calls" is how you tell a finished incident from one still
@@ -357,8 +435,15 @@ function sendIncident(inc) {
     if (withCount.length <= 18) cat = withCount;
   }
   var tag = String(pick(inc, ['agency', 'tg_alpha_tag']));
-  // Prefer the LLM summary; fall back to the representative call's transcript.
-  var text = pick(inc, ['summary', 'representative_excerpt', 'latest_excerpt']);
+  // Prefer the LLM summary; fall back to the representative call's transcript,
+  // skipping any candidate that is a hallucination loop or says nothing. A
+  // summary line reading "632-778" is worse than a blank one.
+  var text = usableText(inc, ['summary', 'representative_excerpt',
+                              'latest_excerpt'], true);
+  // Nothing readable, but the row earned its place on type or location. Spend
+  // the body line on who was talking rather than leaving it blank — the agency
+  // is the last true thing left to say about it.
+  if (!text) text = String(pick(inc, ['agency', 'tg_alpha_tag']));
   enqueue({
     MSG_TYPE: MSG_CALL,
     CALL_ID: Number(inc.event_key) || 0,
@@ -451,6 +536,8 @@ function pollHomeLog(cfg) {
       // top" lands on the most recent.
       for (var i = incs.length - 1; i >= 0; i--) {
         if (!isSignificant(incs[i])) continue;
+        // Significant but unreadable is still not worth a row.
+        if (isEmptyIncident(incs[i])) continue;
         sendIncident(incs[i]);
         shown++;
       }

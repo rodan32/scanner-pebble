@@ -100,6 +100,37 @@ block, orange ward, yellow neighborhood, blue nearby — with severity only
 tinting the text, and a home-block incident spelling it out in the detail
 header so B&W watches get it too.
 
+### Junk never reaches the watch
+
+Two of the backend's own conventions have to be respected on the phone, or the
+feed fills with rows that say nothing:
+
+- **`incident_type` is not free text.** `other` and `unknown` are the
+  enricher's sentinels for *"could not classify"* — `enricher/rules.py` tests
+  for exactly that set throughout. Rendering one puts the word "other" where
+  the answer belongs, so both are treated as absent and the lead falls through
+  to the address.
+- **A unit number is not a summary.** `632-778`, `10-8`, `Code 4` — the
+  backend's Notable query throws these out with `length(transcript) >= 50`.
+  `hasSubstance()` is the honest version of that rule: it counts *letters*, not
+  characters, so a terse but real summary (`Vehicle fire`) survives and
+  anything that is only digits and call signs does not.
+
+`looksHallucinated()` is a direct port of `analytics/app/hallucination.py`
+(itself a port of `enricher/rules.py`) — `/feed/api/since` applies it
+server-side, but the home log does not, so the watch must. **Keep it in sync if
+that file gains new signals.**
+
+Each field falls through to the next candidate when it fails these checks. An
+incident with no classifiable type, no location *and* nothing readable to say
+is dropped entirely — that is the row that renders as a bare timestamp next to
+the word "other". One that still has a type or a location keeps its row, and
+the body line falls back to the agency rather than sitting blank.
+
+Calls get the hallucination check but **not** the substance floor: the live
+tail is raw radio, and a genuinely short transmission is legitimate content
+there.
+
 **Tiers are only trusted once enriched.** The backend's pre-Whisper scorer
 fires `home_block` on cross-city grid collisions before `calls.city` is
 populated, and the enricher retracts it ~30s later (`B-2026-05-12-1`,

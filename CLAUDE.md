@@ -44,7 +44,10 @@ Proximity gets the accent bar, severity only tints text, rows stay
 chronological. A row leads with the incident type, carries the address beneath
 it, and gives that line back to the summary when there is no address.
 Drill-down is list -> incident detail -> its calls -> one transcript; the detail
-exists because it is the only place the full summary fits. See "What counts as
+exists because it is the only place the full summary fits.
+`incident_type` of `other`/`unknown` are the enricher's "couldn't classify"
+sentinels, not labels — treat them as absent. `looksHallucinated()` in
+`index.js` is a port of `analytics/app/hallucination.py`; keep it in sync. See "What counts as
 significant" in `README.md`.
 
 ## Backend coupling
