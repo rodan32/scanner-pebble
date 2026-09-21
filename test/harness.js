@@ -99,6 +99,46 @@ global.XMLHttpRequest = function () {
   };
 };
 
+// --- row preview ------------------------------------------------------------
+// Approximates what main.c's menu_draw_row actually puts on screen, so the
+// harness answers "what will I see" rather than "what got sent". The watch is
+// 200px wide in Gothic 18, which is roughly 30 characters a line: an incident
+// row gets two lines of summary, a call row one. Getting that clamp wrong is
+// how a feed ends up as a list of bare timestamps.
+const ROW_COLS = 30;
+const TIER_MARK = ['   ', ' : ', ' : ', ' | ', '###'];  // 0..4, 4 = home block
+
+function wrap(text, cols, maxLines) {
+  const words = String(text || '').split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+  for (const w of words) {
+    if (!line) { line = w; continue; }
+    if ((line + ' ' + w).length <= cols) { line += ' ' + w; }
+    else { lines.push(line); line = w; if (lines.length === maxLines) break; }
+  }
+  if (line && lines.length < maxLines) lines.push(line);
+  const clipped = words.join(' ').length >
+                  lines.join(' ').length;
+  if (clipped && lines.length) {
+    lines[lines.length - 1] = lines[lines.length - 1].slice(0, cols - 1) + '\u2026';
+  }
+  return lines;
+}
+
+function renderRow(msg) {
+  // Incident rows lead with the type and drop seconds; call rows keep the tag.
+  const incident = !openInc && FILTER !== 4;
+  const lead = (incident && msg.CALL_CAT) ? msg.CALL_CAT : msg.CALL_TAG;
+  const bar = TIER_MARK[msg.CALL_TIER || 0];
+  const em = msg.CALL_EMERG ? '!' : ' ';
+  const head = msg.CALL_TIME + em;
+  const pad = Math.max(1, ROW_COLS + 4 - head.length - String(lead).length);
+  const body = wrap(msg.CALL_TEXT, ROW_COLS, incident ? 2 : 1)
+                 .map((l) => `  ${bar} ${l}`).join('\n');
+  return `  ${bar} ${head}${' '.repeat(pad)}${lead}\n${body}`;
+}
+
 // --- mock: Pebble -----------------------------------------------------------
 const listeners = {};
 let sent = 0;
@@ -109,10 +149,7 @@ global.Pebble = {
     if (msg.MSG_TYPE === 1) {
       console.log(`  [status] ${msg.STATUS}`);
     } else {
-      const em = msg.CALL_EMERG ? ' !EMERG' : '';
-      console.log(`  [call ${msg.CALL_ID}] ${msg.CALL_TIME}  ${msg.CALL_TAG}` +
-                  `${msg.CALL_CAT ? '  (' + msg.CALL_CAT + ')' : ''}${em}\n` +
-                  `             ${msg.CALL_TEXT}`);
+      console.log(renderRow(msg));
     }
     if (ok) setImmediate(ok); // async like the real outbox callback
   },
@@ -141,6 +178,7 @@ fire('ready');
 
 // --offline --open: simulate the watch pressing SELECT on an incident, which is
 // the only way to exercise the drill-down path without a watch.
+let openInc = 0;
 const OPEN_INC = (() => {
   const i = process.argv.indexOf('--open');
   return i >= 0 ? Number(process.argv[i + 1]) : 0;
@@ -148,10 +186,12 @@ const OPEN_INC = (() => {
 if (OPEN_INC) {
   setTimeout(() => {
     console.log(`\n-- SELECT on incident ${OPEN_INC} (drill down to its calls) --`);
+    openInc = OPEN_INC;
     fire('appmessage', { payload: { CMD: 1, CALL_INC: OPEN_INC } });
   }, 300);
   setTimeout(() => {
     console.log('\n-- BACK to the incident list --');
+    openInc = 0;
     fire('appmessage', { payload: { CMD: 2 } });
   }, 900);
 }

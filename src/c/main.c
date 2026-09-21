@@ -264,8 +264,19 @@ static uint16_t menu_get_num_rows(MenuLayer *menu, uint16_t section, void *ctx) 
   return n > 0 ? n : 1;   // one row for the "waiting"/"loading" placeholder
 }
 
+// True when the visible list holds incidents rather than calls. The member list
+// and the Live view are call-grain; every other view is incident-grain. No flag
+// on the row is needed — the view already says which it is.
+static bool showing_incidents(void) {
+  return !s_in_members && s_filter != VIEW_LIVE;
+}
+
+// An incident row is taller: its whole job is to answer "what happened", and a
+// 46px row gives the summary one line — about thirty characters, which truncates
+// mid-clause and tells you nothing. Two lines costs one visible row and is the
+// difference between a readable feed and a list of timestamps.
 static int16_t menu_get_cell_height(MenuLayer *menu, MenuIndex *idx, void *ctx) {
-  return 46;
+  return showing_incidents() ? 66 : 46;
 }
 
 static void menu_draw_row(GContext *gctx, const Layer *cell, MenuIndex *idx, void *ctx) {
@@ -316,23 +327,41 @@ static void menu_draw_row(GContext *gctx, const Layer *cell, MenuIndex *idx, voi
   }
 #endif
 
-  // Top line: HH:MM:SS  +  talkgroup tag (right aligned)
+  // Top line: HH:MM:SS + what-or-who, right aligned.
+  //
+  // For an INCIDENT that is the incident type ("traffic accident") — the thing
+  // the user is actually asking the watch. The talkgroup is who was talking,
+  // which matters far less once a row represents an episode rather than one
+  // transmission, so it moves to the detail view. It still drives the colour,
+  // so the agency is legible without spending a line on it.
+  //
+  // For a CALL row the tag IS the useful identity, so it stays.
+  bool incident = showing_incidents();
+  const char *lead = (incident && e->cat[0]) ? e->cat : e->tag;
+
+  // An incident's clock is HH:MM (the phone drops the seconds), so it needs far
+  // less room than a call's HH:MM:SS — and every pixel saved goes to the type,
+  // which is the part that has to survive without being ellipsized.
+  int time_w = incident ? 44 : 78;
   graphics_context_set_text_color(gctx, time_color);
   graphics_draw_text(gctx, e->time,
                      fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-                     GRect(text_x, -2, 78, 20),
+                     GRect(text_x, -2, time_w, 20),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   graphics_context_set_text_color(gctx, tag_color);
-  graphics_draw_text(gctx, e->tag,
+  graphics_draw_text(gctx, lead,
                      fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-                     GRect(text_x + 78, -2, b.size.w - text_x - 84, 20),
+                     GRect(text_x + time_w, -2, b.size.w - text_x - time_w - 6, 20),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
 
   // Bottom line: transcript snippet
   graphics_context_set_text_color(gctx, selected ? GColorWhite : GColorBlack);
+  // Body: the summary. Two lines for an incident, one for a call. graphics_draw_text
+  // wraps to fill the rect and ellipsizes the last line that doesn't fit.
   graphics_draw_text(gctx, e->text,
                      fonts_get_system_font(FONT_KEY_GOTHIC_18),
-                     GRect(text_x, 20, b.size.w - text_x - 6, 24),
+                     incident ? GRect(text_x, 18, b.size.w - text_x - 6, 46)
+                              : GRect(text_x, 20, b.size.w - text_x - 6, 24),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 

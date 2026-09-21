@@ -56,10 +56,22 @@ A minor call on your own block is exactly what this view exists to surface;
 severity is the backend's read of the radio traffic, not of how much it matters
 to you.
 
-The list row only has room for time, agency and one ellipsized line of summary,
-so `CALL_CAT` never reaches it — the member count rides the agency tag instead
-(`OrmLndn PD 1 ·3`), because "5 calls" is how you tell a finished incident from
-one still developing.
+An **incident row leads with the incident type**, not the talkgroup. Once a row
+is an episode rather than a single transmission, who was talking matters much
+less than what happened — so the agency moves to the detail view and keeps only
+its colour here. `incident_type` is NULL on plenty of rows, so the lead falls
+back to the address, then the city: near home, *where* is most of the answer.
+
+Incident rows are 66px rather than 46px, giving the summary **two lines**. One
+line is about thirty characters, which truncates mid-clause and leaves a list of
+bare timestamps. The extra height costs one visible row and is the difference
+between a feed you can read and one you have to open.
+
+The clock drops to `HH:MM` on incidents — seconds are noise on something that
+spanned minutes, and the space goes to the type. The member count (`·3`) is
+appended to the lead only when it still fits in ~18 characters; a truncated
+`suspicious vehi…` is worse than no count, and the member list spells it out in
+its header anyway.
 
 Rows stay in **chronological** order. Proximity gets its own visual channel
 instead of a competing sort: a 4px accent bar in the left margin — red for home
@@ -169,9 +181,9 @@ This repo is the source of truth; CloudPebble is the build/flash backend
 | `CALL_ORD`   | JS→watch  | sort key, descending: call id or `start_time` |
 | `CALL_INC`   | JS→watch  | incident id to drill into; 0 = leaf row       |
 | `CALL_TIER`  | JS→watch  | relevance tier 0-4 (4 = home block)           |
-| `CALL_TIME`  | JS→watch  | `HH:MM:SS`                                    |
-| `CALL_TAG`   | JS→watch  | talkgroup / agency, plus `·N` member count    |
-| `CALL_CAT`   | JS→watch  | incident type or city (detail view only)      |
+| `CALL_TIME`  | JS→watch  | `HH:MM:SS` on calls, `HH:MM` on incidents     |
+| `CALL_TAG`   | JS→watch  | talkgroup / agency (lead on call rows)        |
+| `CALL_CAT`   | JS→watch  | incident type / address, `·N` (lead on incidents) |
 | `CALL_TEXT`  | JS→watch  | summary or transcript (~156 chars)            |
 | `CALL_EMERG` | JS→watch  | 1 if severity is high/critical                |
 | `STATUS`     | JS→watch  | connection/status text                        |

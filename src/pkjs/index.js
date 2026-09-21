@@ -229,13 +229,15 @@ function pad2(n) {
 // incident-shaped rows) a bare epoch int, so normalize all three to HH:MM:SS
 // rather than blind-slicing the tail — `.slice(-15)` on an ISO stamp yields
 // "9-21T14:03:22", which is what the watch used to render.
-function clockOf(raw) {
+function clockOf(raw, hm) {
   if (typeof raw === 'number' || /^\d{9,11}$/.test(String(raw))) {
     var d = new Date(Number(raw) * 1000);
-    return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+    var t = pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    return hm ? t : t + ':' + pad2(d.getSeconds());
   }
-  var m = /(\d{1,2}:\d{2}(?::\d{2})?)/.exec(String(raw || ''));
-  return m ? m[1] : String(raw || '').slice(-8);
+  var m = /(\d{1,2}:\d{2})(:\d{2})?/.exec(String(raw || ''));
+  if (!m) return String(raw || '').slice(-8);
+  return (hm || !m[2]) ? m[1] : m[1] + m[2];
 }
 
 // Personal-relevance tiers, from the backend's enricher (relevance_score() in
@@ -327,24 +329,36 @@ function sendIncident(inc) {
   // Secondary line: what happened, else where. Append the member-call count
   // when an incident is more than a single call — "3 calls" is a useful signal
   // that something is still developing.
-  var cat = pick(inc, ['incident_type', 'city']);
-  // The list row only has room for time, agency and one line of summary — `cat`
-  // is detail-only. The member count is worth more than that: "5 calls" is how
-  // you tell a finished incident from one still developing, at a glance. So it
-  // rides the agency tag, which is what the list actually draws.
+  // The row's lead line answers "what happened". incident_type is the real
+  // answer, but the backend leaves it NULL on plenty of rows — fall back to
+  // WHERE rather than to nothing, since an address near home is itself most of
+  // the answer. The summary underneath carries the detail either way.
+  var cat = pick(inc, ['incident_type', 'address', 'city']);
+  // The member count rides the lead line, since that is what the list draws for
+  // an incident — "5 calls" is how you tell a finished incident from one still
+  // developing. But the TYPE is the thing the user came for, so the count is
+  // appended only when it still fits: ~18 characters is all that survives next
+  // to the clock at Gothic 18 Bold on a 200px screen, and a truncated
+  // "suspicious vehi…" is worse than no count at all. It is spelled out in the
+  // member list's header either way.
   //
   // U+00B7 middle dot, written as the character rather than as its UTF-8 bytes:
   // the AppMessage layer encodes the string itself, so a hand-rolled \xC2\xB7
   // gets double-encoded and lands on the watch as mojibake.
   var n = Number(inc.local_call_count || inc.incident_member_count || 0);
+  if (n > 1) {
+    var withCount = cat + '\u00B7' + n;
+    if (withCount.length <= 18) cat = withCount;
+  }
   var tag = String(pick(inc, ['agency', 'tg_alpha_tag']));
-  if (n > 1) tag = tag.slice(0, 20) + ' \u00B7' + n;
   // Prefer the LLM summary; fall back to the representative call's transcript.
   var text = pick(inc, ['summary', 'representative_excerpt', 'latest_excerpt']);
   enqueue({
     MSG_TYPE: MSG_CALL,
     CALL_ID: Number(inc.event_key) || 0,
-    CALL_TIME: clockOf(pick(inc, ['start_time'])),
+    // Seconds are noise on an episode that spanned minutes, and the space goes
+    // to the incident type instead.
+    CALL_TIME: clockOf(pick(inc, ['start_time', 'when']), true),
     CALL_TAG: tag.slice(0, 26),
     CALL_CAT: String(cat).slice(0, 24),
     CALL_TEXT: String(text).slice(0, 156),

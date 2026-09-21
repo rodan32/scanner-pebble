@@ -67,6 +67,20 @@
         "representative_excerpt": "I'll be out with a silver sedan, 640 North."
       },
       {
+        "event_key": 90211,
+        "incident_id": 4472,
+        "start_time": 1790010800,
+        "tiers": [
+          "home_block"
+        ],
+        "severity": "low",
+        "address": "640 N 700 E",
+        "city": "Orem",
+        "agency": "OrmLndn PD 1",
+        "local_call_count": 2,
+        "representative_excerpt": "Caller reports a garage door left open overnight on the north side."
+      },
+      {
         "event_key": 90209,
         "incident_id": 4470,
         "start_time": 1790009000,
